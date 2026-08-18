@@ -1,6 +1,6 @@
 import os
-
-import resend
+import smtplib
+from email.message import EmailMessage
 
 
 class EmailConfigurationError(Exception):
@@ -15,15 +15,15 @@ class EmailDeliveryError(Exception):
     pass
 
 
-RESEND_API_KEY = os.getenv(
-    "RESEND_API_KEY",
+FINORA_GMAIL_USER = os.getenv(
+    "FINORA_GMAIL_USER",
     "",
 ).strip()
 
-FINORA_FROM_EMAIL = os.getenv(
-    "FINORA_FROM_EMAIL",
+FINORA_GMAIL_APP_PASSWORD = os.getenv(
+    "FINORA_GMAIL_APP_PASSWORD",
     "",
-).strip()
+).replace(" ", "").strip()
 
 
 def build_otp_html(otp: str) -> str:
@@ -129,17 +129,20 @@ def send_otp_email(
     otp: str,
 ) -> None:
 
-    if not RESEND_API_KEY:
+    if not FINORA_GMAIL_USER:
         raise EmailConfigurationError(
-            "RESEND_API_KEY is not configured."
+            "FINORA_GMAIL_USER is not configured."
         )
 
-    if not FINORA_FROM_EMAIL:
+    if not FINORA_GMAIL_APP_PASSWORD:
         raise EmailConfigurationError(
-            "FINORA_FROM_EMAIL is not configured."
+            "FINORA_GMAIL_APP_PASSWORD is not configured."
         )
 
-    if not recipient_email.strip():
+    recipient_email = recipient_email.strip()
+    otp = otp.strip()
+
+    if not recipient_email:
         raise EmailDeliveryError(
             "Recipient email is required."
         )
@@ -149,25 +152,42 @@ def send_otp_email(
             "OTP must contain exactly 6 digits."
         )
 
+    message = EmailMessage()
+
+    message["Subject"] = "Your Finora Verification Code"
+    message["From"] = f"Finora <{FINORA_GMAIL_USER}>"
+    message["To"] = recipient_email
+
+    message.set_content(
+        build_otp_text(otp)
+    )
+
+    message.add_alternative(
+        build_otp_html(otp),
+        subtype="html"
+    )
+
     try:
-        resend.api_key = RESEND_API_KEY
+        with smtplib.SMTP_SSL(
+            "smtp.gmail.com",
+            465,
+            timeout=30,
+        ) as smtp:
 
-        params: resend.Emails.SendParams = {
-            "from": f"Finora <{FINORA_FROM_EMAIL}>",
-            "to": [recipient_email.strip()],
-            "subject": "Your Finora Verification Code",
-            "html": build_otp_html(otp),
-            "text": build_otp_text(otp),
-        }
-
-        result = resend.Emails.send(params)
-
-        if not result:
-            raise EmailDeliveryError(
-                "Email provider returned an empty response."
+            smtp.login(
+                FINORA_GMAIL_USER,
+                FINORA_GMAIL_APP_PASSWORD
             )
 
-    except EmailDeliveryError:
+            smtp.send_message(message)
+
+    except smtplib.SMTPAuthenticationError as exc:
+        raise EmailAuthenticationError(
+            "Gmail authentication failed. "
+            "Check the Finora Gmail address and App Password."
+        ) from exc
+
+    except EmailAuthenticationError:
         raise
 
     except Exception as exc:
