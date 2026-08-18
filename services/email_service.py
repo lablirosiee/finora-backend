@@ -1,13 +1,6 @@
-import smtplib
-from email.message import EmailMessage
+import os
 
-from config import (
-    GMAIL_APP_PASSWORD,
-    GMAIL_USER,
-    SMTP_HOST,
-    SMTP_PORT,
-    SMTP_TIMEOUT_SECONDS,
-)
+import resend
 
 
 class EmailConfigurationError(Exception):
@@ -22,52 +15,21 @@ class EmailDeliveryError(Exception):
     pass
 
 
-def build_otp_email(
-    recipient_email: str,
-    otp: str,
-) -> EmailMessage:
-    message = EmailMessage()
+RESEND_API_KEY = os.getenv(
+    "RESEND_API_KEY",
+    "",
+).strip()
 
-    message["Subject"] = (
-        "Your Finora Verification Code"
-    )
+FINORA_FROM_EMAIL = os.getenv(
+    "FINORA_FROM_EMAIL",
+    "",
+).strip()
 
-    message["From"] = (
-        f"Finora <{GMAIL_USER}>"
-    )
 
-    message["To"] = recipient_email
-
-    message.set_content(
-        f"""
-Hello!
-
-Your Finora verification code is:
-
-{otp}
-
-This code is intended only for your Finora account verification.
-Please do not share it with anyone.
-
-If you did not request this code, you may ignore this email.
-
-– Finora
-""".strip()
-    )
-
-    message.add_alternative(
-        f"""
+def build_otp_html(otp: str) -> str:
+    return f"""
 <!DOCTYPE html>
 <html lang="en">
-<head>
-    <meta charset="UTF-8">
-    <meta
-        name="viewport"
-        content="width=device-width, initial-scale=1.0"
-    >
-    <title>Finora Verification Code</title>
-</head>
-
 <body style="
     margin: 0;
     padding: 30px 15px;
@@ -77,15 +39,16 @@ If you did not request this code, you may ignore this email.
     <div style="
         max-width: 520px;
         margin: 0 auto;
-        padding: 32px;
         background-color: #ffffff;
         border-radius: 14px;
+        padding: 32px;
         box-shadow: 0 4px 18px rgba(0, 0, 0, 0.08);
     ">
+
         <h1 style="
             margin: 0 0 8px 0;
             color: #2563eb;
-            font-size: 30px;
+            font-size: 28px;
         ">
             Finora
         </h1>
@@ -102,8 +65,8 @@ If you did not request this code, you may ignore this email.
             color: #4b5563;
             line-height: 1.6;
         ">
-            Use the verification code below to
-            continue creating your Finora account.
+            Use the verification code below to continue
+            creating your Finora account.
         </p>
 
         <div style="
@@ -124,8 +87,7 @@ If you did not request this code, you may ignore this email.
             color: #6b7280;
             line-height: 1.6;
         ">
-            Please do not share this code with
-            anyone.
+            Please do not share this code with anyone.
         </p>
 
         <p style="
@@ -137,48 +99,76 @@ If you did not request this code, you may ignore this email.
             If you did not request this code,
             you may safely ignore this email.
         </p>
+
     </div>
 </body>
 </html>
-""".strip(),
-        subtype="html",
-    )
+""".strip()
 
-    return message
+
+def build_otp_text(otp: str) -> str:
+    return f"""
+Hello!
+
+Your Finora verification code is:
+
+{otp}
+
+This code is intended only for your Finora account verification.
+
+Please do not share this code with anyone.
+
+If you did not request this code, you may safely ignore this email.
+
+– Finora
+""".strip()
 
 
 def send_otp_email(
     recipient_email: str,
     otp: str,
 ) -> None:
-    if not GMAIL_USER or not GMAIL_APP_PASSWORD:
+
+    if not RESEND_API_KEY:
         raise EmailConfigurationError(
-            "Email credentials are not configured."
+            "RESEND_API_KEY is not configured."
         )
 
-    message = build_otp_email(
-        recipient_email=recipient_email,
-        otp=otp,
-    )
+    if not FINORA_FROM_EMAIL:
+        raise EmailConfigurationError(
+            "FINORA_FROM_EMAIL is not configured."
+        )
+
+    if not recipient_email.strip():
+        raise EmailDeliveryError(
+            "Recipient email is required."
+        )
+
+    if len(otp) != 6 or not otp.isdigit():
+        raise EmailDeliveryError(
+            "OTP must contain exactly 6 digits."
+        )
 
     try:
-        with smtplib.SMTP_SSL(
-            host=SMTP_HOST,
-            port=SMTP_PORT,
-            timeout=SMTP_TIMEOUT_SECONDS,
-        ) as smtp:
-            smtp.login(
-                GMAIL_USER,
-                GMAIL_APP_PASSWORD,
+        resend.api_key = RESEND_API_KEY
+
+        params: resend.Emails.SendParams = {
+            "from": f"Finora <{FINORA_FROM_EMAIL}>",
+            "to": [recipient_email.strip()],
+            "subject": "Your Finora Verification Code",
+            "html": build_otp_html(otp),
+            "text": build_otp_text(otp),
+        }
+
+        result = resend.Emails.send(params)
+
+        if not result:
+            raise EmailDeliveryError(
+                "Email provider returned an empty response."
             )
 
-            smtp.send_message(message)
-
-    except smtplib.SMTPAuthenticationError as exc:
-        raise EmailAuthenticationError(
-            "Gmail authentication failed. "
-            "Check the Gmail address and App Password."
-        ) from exc
+    except EmailDeliveryError:
+        raise
 
     except Exception as exc:
         raise EmailDeliveryError(
