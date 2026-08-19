@@ -1,5 +1,5 @@
 import os
-import resend
+import requests
 
 
 class EmailConfigurationError(Exception):
@@ -14,8 +14,8 @@ class EmailDeliveryError(Exception):
     pass
 
 
-RESEND_API_KEY = os.getenv(
-    "RESEND_API_KEY",
+BREVO_API_KEY = os.getenv(
+    "BREVO_API_KEY",
     "",
 ).strip()
 
@@ -128,9 +128,9 @@ def send_otp_email(
     otp: str,
 ) -> None:
 
-    if not RESEND_API_KEY:
+    if not BREVO_API_KEY:
         raise EmailConfigurationError(
-            "RESEND_API_KEY is not configured."
+            "BREVO_API_KEY is not configured."
         )
 
     if not FINORA_FROM_EMAIL:
@@ -151,28 +151,57 @@ def send_otp_email(
             "OTP must contain exactly 6 digits."
         )
 
+    url = "https://api.brevo.com/v3/smtp/email"
+
+    headers = {
+        "accept": "application/json",
+        "api-key": BREVO_API_KEY,
+        "content-type": "application/json",
+    }
+
+    payload = {
+        "sender": {
+            "name": "Finora",
+            "email": FINORA_FROM_EMAIL,
+        },
+        "to": [
+            {
+                "email": recipient_email,
+            }
+        ],
+        "subject": "Your Finora Verification Code",
+        "htmlContent": build_otp_html(otp),
+        "textContent": build_otp_text(otp),
+    }
+
     try:
-        resend.api_key = RESEND_API_KEY
+        response = requests.post(
+            url,
+            headers=headers,
+            json=payload,
+            timeout=30,
+        )
 
-        params: resend.Emails.SendParams = {
-            "from": f"Finora <{FINORA_FROM_EMAIL}>",
-            "to": [recipient_email],
-            "subject": "Your Finora Verification Code",
-            "html": build_otp_html(otp),
-            "text": build_otp_text(otp),
-        }
+        if response.status_code in (200, 201, 202):
+            return
 
-        result = resend.Emails.send(params)
-
-        if not result:
-            raise EmailDeliveryError(
-                "Email provider returned an empty response."
+        if response.status_code in (401, 403):
+            raise EmailAuthenticationError(
+                f"Brevo authentication failed: {response.text}"
             )
+
+        raise EmailDeliveryError(
+            f"Brevo returned HTTP {response.status_code}: "
+            f"{response.text}"
+        )
+
+    except EmailAuthenticationError:
+        raise
 
     except EmailDeliveryError:
         raise
 
-    except Exception as exc:
+    except requests.RequestException as exc:
         raise EmailDeliveryError(
-            f"Failed to send OTP email: {exc}"
+            f"Failed to connect to Brevo: {exc}"
         ) from exc
