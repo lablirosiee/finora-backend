@@ -893,10 +893,10 @@ def claim_verification_token(
             or 0
         )
 
-        /*
-         * Allow recovery from an abandoned claim after
-         * its short processing lease expires.
-         */
+        
+         # Allow recovery from an abandoned claim after
+         # its short processing lease expires.
+         
         if (
             processing and
             processing_until > now
