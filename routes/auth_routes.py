@@ -448,12 +448,11 @@ def reset_password(
 
     except Exception as exc:
 
-        /*
-         * Password update failed.
-         *
-         * Release token so user can retry instead of
-         * requiring another OTP immediately.
-         */
+
+         # Password update failed
+         # Release token so user can retry instead of
+         # requiring another OTP immediately.
+         
         try:
             release_verification_token(
                 token_reference,
@@ -483,15 +482,12 @@ def reset_password(
 
     except OtpServiceError as exc:
 
-        /*
-         * IMPORTANT:
-         *
-         * The password has already been successfully updated
-         * in Firebase at this point.
-         *
-         * Do NOT attempt to restore the previous password,
-         * because the backend intentionally does not know it.
-         */
+        # IMPORTANT:
+         #The password has already been successfully updated
+         #in Firebase at this point
+         # Do NOT attempt to restore the previous password,
+         # because the backend intentionally does not know it.
+         
         raise HTTPException(
             status_code=
                 status.HTTP_500_INTERNAL_SERVER_ERROR,

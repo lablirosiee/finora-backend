@@ -630,12 +630,12 @@ def verify_otp(
 
             "used": False,
 
-            /*
-             * processing fields allow a token to be
-             * safely claimed for registration/password
-             * reset without permanently consuming it
-             * before the sensitive operation succeeds.
-             */
+            
+             #processing fields allow a token to be
+             # safely claimed for registration/password
+             #reset without permanently consuming it
+             # before the sensitive operation succeeds.
+             
             "processing": False,
             "processing_id": None,
             "processing_until": 0,
