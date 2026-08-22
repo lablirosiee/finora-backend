@@ -1,14 +1,15 @@
 from fastapi import APIRouter, HTTPException, status
 
 from schemas.otp_schemas import (
-    OtpEmailRequest,
-    OtpEmailResponse,
+    OtpRequest,
+    OtpRequestResponse,
+    OtpVerifyRequest,
+    OtpVerifyResponse,
 )
-from services.email_service import (
-    EmailAuthenticationError,
-    EmailConfigurationError,
-    EmailDeliveryError,
-    send_otp_email,
+from services.otp_service import (
+    request_otp,
+    verify_otp,
+    OtpServiceError,
 )
 
 
@@ -19,41 +20,67 @@ router = APIRouter(
 
 
 @router.post(
-    "/send",
-    response_model=OtpEmailResponse,
+    "/request",
+    response_model=OtpRequestResponse,
     status_code=status.HTTP_200_OK,
 )
-def send_otp(
-    request: OtpEmailRequest,
-) -> OtpEmailResponse:
-    recipient_email = str(request.email).strip()
-    otp = request.otp.strip()
+def request_endpoint(request: OtpRequest) -> OtpRequestResponse:
+    recipient_email = str(request.email).strip().lower()
+    purpose = str(request.purpose).strip()
 
     try:
-        send_otp_email(
-            recipient_email=recipient_email,
-            otp=otp,
-        )
+        request_otp(recipient_email, purpose)
 
-    except EmailConfigurationError as exc:
+    except OtpServiceError as exc:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail=str(exc),
         ) from exc
 
-    except EmailAuthenticationError as exc:
+    except ValueError as exc:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
 
-    except EmailDeliveryError as exc:
+    except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send OTP email.",
+        ) from exc
+
+    return OtpRequestResponse(success=True, message="OTP sent.")
+
+
+@router.post(
+    "/verify",
+    response_model=OtpVerifyResponse,
+    status_code=status.HTTP_200_OK,
+)
+def verify_endpoint(request: OtpVerifyRequest) -> OtpVerifyResponse:
+    recipient_email = str(request.email).strip().lower()
+    purpose = str(request.purpose).strip()
+    otp = str(request.otp).strip()
+
+    try:
+        verification_token = verify_otp(recipient_email, purpose, otp)
+
+    except OtpServiceError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
 
-    return OtpEmailResponse(
-        success=True,
-        message="OTP email sent successfully.",
-    )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to verify OTP.",
+        ) from exc
+
+    return OtpVerifyResponse(success=True, verificationToken=verification_token)
