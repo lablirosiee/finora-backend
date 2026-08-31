@@ -1,13 +1,17 @@
 .env
-
 __pycache__/
 *.pyc
-
 .venv/
 venv/
 
 dataset/
+models/
 outputs/
+scripts/
+
+routes/forecast_routes.py
+schemas/forecast_schemas.py
+services/forecast_service.py
 
 android_integration_guide.md
 README_API.md

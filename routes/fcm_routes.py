@@ -1,4 +1,6 @@
-from fastapi import APIRouter, HTTPException
+import logging
+
+from fastapi import APIRouter, HTTPException, status
 
 from schemas.fcm_schemas import (
     FcmSendRequest,
@@ -10,20 +12,47 @@ from services.fcm_service import (
 )
 
 
+# ============================================================
+# Logging
+# ============================================================
+
+logger = logging.getLogger(__name__)
+
+
+# ============================================================
+# Router
+# ============================================================
+
 router = APIRouter(
     prefix="/fcm",
     tags=["FCM"],
 )
 
 
+# ============================================================
+# Test FCM Push
+# ============================================================
+
 @router.post(
     "/send-test",
     response_model=FcmSendResponse,
+    status_code=status.HTTP_200_OK,
 )
 def send_test_push(
     request: FcmSendRequest,
-):
+) -> FcmSendResponse:
+    """
+    Send a data-only FCM push for development/testing.
+
+    IMPORTANT:
+    This endpoint does NOT create a Firestore notification.
+
+    Production notifications must go through
+    notification_service.create_and_send_notification().
+    """
+
     try:
+
         message_id = send_push_to_user(
             user_id=request.userId,
             notification_type=request.type,
@@ -33,19 +62,35 @@ def send_test_push(
             student_id=request.studentId,
         )
 
+
         return FcmSendResponse(
             success=True,
             messageId=message_id,
         )
 
+
     except ValueError as exc:
-        raise HTTPException(
-            status_code=400,
-            detail=str(exc),
+
+        logger.warning(
+            "FCM test request rejected: %s",
+            exc,
         )
 
-    except Exception as exc:
+
         raise HTTPException(
-            status_code=500,
-            detail=f"FCM send failed: {exc}",
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+
+    except Exception:
+
+        logger.exception(
+            "Unexpected error while sending test FCM push."
+        )
+
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send FCM notification.",
         )
