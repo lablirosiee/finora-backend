@@ -24,12 +24,26 @@ router = APIRouter(
     response_model=OtpRequestResponse,
     status_code=status.HTTP_200_OK,
 )
-def request_endpoint(request: OtpRequest) -> OtpRequestResponse:
-    recipient_email = str(request.email).strip().lower()
-    purpose = str(request.purpose).strip()
+def request_endpoint(
+    request: OtpRequest,
+) -> OtpRequestResponse:
+
+    recipient_email = (
+        str(request.email)
+        .strip()
+        .lower()
+    )
+
+    purpose = (
+        str(request.purpose)
+        .strip()
+    )
 
     try:
-        request_otp(recipient_email, purpose)
+        request_otp(
+            recipient_email,
+            purpose,
+        )
 
     except OtpServiceError as exc:
         raise HTTPException(
@@ -44,12 +58,21 @@ def request_endpoint(request: OtpRequest) -> OtpRequestResponse:
         ) from exc
 
     except Exception as exc:
+        print(
+            "OTP REQUEST ERROR:",
+            type(exc).__name__,
+            str(exc),
+        )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to send OTP email.",
         ) from exc
 
-    return OtpRequestResponse(success=True, message="OTP sent.")
+    return OtpRequestResponse(
+        success=True,
+        message="OTP sent.",
+    )
 
 
 @router.post(
@@ -57,13 +80,32 @@ def request_endpoint(request: OtpRequest) -> OtpRequestResponse:
     response_model=OtpVerifyResponse,
     status_code=status.HTTP_200_OK,
 )
-def verify_endpoint(request: OtpVerifyRequest) -> OtpVerifyResponse:
-    recipient_email = str(request.email).strip().lower()
-    purpose = str(request.purpose).strip()
-    otp = str(request.otp).strip()
+def verify_endpoint(
+    request: OtpVerifyRequest,
+) -> OtpVerifyResponse:
+
+    recipient_email = (
+        str(request.email)
+        .strip()
+        .lower()
+    )
+
+    purpose = (
+        str(request.purpose)
+        .strip()
+    )
+
+    otp = (
+        str(request.otp)
+        .strip()
+    )
 
     try:
-        verification_token = verify_otp(recipient_email, purpose, otp)
+        verification_token = verify_otp(
+            recipient_email,
+            purpose,
+            otp,
+        )
 
     except OtpServiceError as exc:
         raise HTTPException(
@@ -78,9 +120,18 @@ def verify_endpoint(request: OtpVerifyRequest) -> OtpVerifyResponse:
         ) from exc
 
     except Exception as exc:
+        print(
+            "OTP VERIFY ERROR:",
+            type(exc).__name__,
+            str(exc),
+        )
+
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to verify OTP.",
         ) from exc
 
-    return OtpVerifyResponse(success=True, verificationToken=verification_token)
+    return OtpVerifyResponse(
+        success=True,
+        verificationToken=verification_token,
+    )
