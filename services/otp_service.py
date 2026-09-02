@@ -368,54 +368,50 @@ def verify_otp(
     otp: str
 ) -> str:
 
-    email = _normalize_email(
-        email
-    )
-
-    purpose = _validate_purpose(
-        purpose
-    )
-
+    email = _normalize_email(email)
+    purpose = _validate_purpose(purpose)
     otp = otp.strip()
 
-    if (
-        len(otp) != 6 or
-        not otp.isdigit()
-    ):
+    if len(otp) != 6 or not otp.isdigit():
         raise OtpServiceError(
             "OTP must contain exactly 6 digits."
         )
 
-    latest_doc = (
-        _get_latest_unused_otp(
-            email,
-            purpose
-        )
+    latest_doc = _get_latest_unused_otp(
+        email,
+        purpose,
     )
 
     if latest_doc is None:
-
         raise OtpServiceError(
             "No active OTP was found."
         )
 
-    otp_reference = (
-        latest_doc.reference
+    otp_reference = latest_doc.reference
+
+    # ---------------------------------------------------------
+    # Prepare verification token before transaction
+    # ---------------------------------------------------------
+
+    token = secrets.token_urlsafe(32)
+    token_salt = secrets.token_hex(16)
+
+    token_hash = _hash_value(
+        token,
+        token_salt,
     )
 
-    transaction = (
-        db.transaction()
+    token_reference = (
+        TOKENS_COLLECTION.document()
     )
+
+    transaction = db.transaction()
 
     @firestore.transactional
-    def verify_in_transaction(
-        transaction
-    ):
+    def verify_in_transaction(transaction):
 
-        snapshot = (
-            otp_reference.get(
-                transaction=transaction
-            )
+        snapshot = otp_reference.get(
+            transaction=transaction
         )
 
         if not snapshot.exists:
@@ -423,17 +419,9 @@ def verify_otp(
                 "OTP no longer exists."
             )
 
-        data = (
-            snapshot.to_dict()
-            or {}
-        )
+        data = snapshot.to_dict() or {}
 
-        if bool(
-            data.get(
-                "used",
-                False
-            )
-        ):
+        if bool(data.get("used", False)):
             raise OtpServiceError(
                 "OTP has already been used."
             )
@@ -441,25 +429,17 @@ def verify_otp(
         now = _now()
 
         expires_at = int(
-            data.get(
-                "expires_at",
-                0
-            )
-            or 0
+            data.get("expires_at", 0) or 0
         )
 
-        if (
-            expires_at <= 0 or
-            now > expires_at
-        ):
+        if expires_at <= 0 or now > expires_at:
 
             transaction.update(
                 otp_reference,
                 {
                     "used": True,
-                    "invalidated_reason":
-                        "expired",
-                }
+                    "invalidated_reason": "expired",
+                },
             )
 
             raise OtpServiceError(
@@ -467,11 +447,7 @@ def verify_otp(
             )
 
         attempts_left = int(
-            data.get(
-                "attempts_left",
-                0
-            )
-            or 0
+            data.get("attempts_left", 0) or 0
         )
 
         if attempts_left <= 0:
@@ -483,7 +459,7 @@ def verify_otp(
                     "attempts_left": 0,
                     "invalidated_reason":
                         "attempt_limit",
-                }
+                },
             )
 
             raise OtpServiceError(
@@ -491,53 +467,40 @@ def verify_otp(
             )
 
         salt = str(
-            data.get(
-                "salt",
-                ""
-            )
+            data.get("salt", "")
         )
 
         stored_hash = str(
-            data.get(
-                "otp_hash",
-                ""
-            )
+            data.get("otp_hash", "")
         )
 
-        if (
-            not salt or
-            not stored_hash
-        ):
+        if not salt or not stored_hash:
             raise OtpServiceError(
                 "OTP record is invalid."
             )
 
-        computed_hash = (
-            _hash_value(
-                otp,
-                salt
-            )
+        computed_hash = _hash_value(
+            otp,
+            salt,
         )
+
+        # -----------------------------------------------------
+        # Incorrect OTP
+        # -----------------------------------------------------
 
         if not secrets.compare_digest(
             computed_hash,
-            stored_hash
+            stored_hash,
         ):
 
-            remaining = (
-                attempts_left - 1
-            )
+            remaining = attempts_left - 1
 
             updates = {
                 "attempts_left":
-                    max(
-                        remaining,
-                        0
-                    )
+                    max(remaining, 0)
             }
 
             if remaining <= 0:
-
                 updates.update(
                     {
                         "used": True,
@@ -548,11 +511,10 @@ def verify_otp(
 
             transaction.update(
                 otp_reference,
-                updates
+                updates,
             )
 
             if remaining <= 0:
-
                 raise OtpServiceError(
                     "Too many failed attempts. "
                     "OTP invalidated."
@@ -563,26 +525,62 @@ def verify_otp(
                 f"{remaining} attempts remaining."
             )
 
-        # ----------------------------------------------------
-        # OTP valid
-        # Consume it atomically.
-        # ----------------------------------------------------
+        # -----------------------------------------------------
+        # Correct OTP
+        #
+        # IMPORTANT:
+        # Consume OTP and create verification token in the
+        # SAME Firestore transaction.
+        # -----------------------------------------------------
 
         transaction.update(
             otp_reference,
             {
                 "used": True,
                 "verified_at": now,
-            }
+            },
         )
 
-        return now
+        transaction.set(
+            token_reference,
+            {
+                "email": email,
+                "purpose": purpose,
 
-    verified_at = (
-        verify_in_transaction(
-            transaction
+                "token_hash":
+                    token_hash,
+
+                "salt":
+                    token_salt,
+
+                "created_at":
+                    now,
+
+                "expires_at":
+                    (
+                        now +
+                        VERIFICATION_TOKEN_EXPIRY
+                    ),
+
+                "used":
+                    False,
+
+                "processing":
+                    False,
+
+                "processing_id":
+                    None,
+
+                "processing_until":
+                    0,
+            },
         )
+
+    verify_in_transaction(
+        transaction
     )
+
+    return token
 
     # --------------------------------------------------------
     # Issue verification token

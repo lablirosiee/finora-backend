@@ -6,6 +6,7 @@ from schemas.otp_schemas import (
     OtpVerifyRequest,
     OtpVerifyResponse,
 )
+
 from services.otp_service import (
     request_otp,
     verify_otp,
@@ -18,6 +19,10 @@ router = APIRouter(
     tags=["OTP Authentication"],
 )
 
+
+# ============================================================
+# REQUEST OTP
+# ============================================================
 
 @router.post(
     "/request",
@@ -74,6 +79,10 @@ def request_endpoint(
         message="OTP sent.",
     )
 
+
+# ============================================================
+# VERIFY OTP
+# ============================================================
 
 @router.post(
     "/verify",
