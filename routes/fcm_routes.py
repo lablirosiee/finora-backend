@@ -30,6 +30,66 @@ router = APIRouter(
 
 
 # ============================================================
+# Production FCM Push
+# ============================================================
+
+@router.post(
+    "/send",
+    response_model=FcmSendResponse,
+    status_code=status.HTTP_200_OK,
+)
+def send_push(
+    request: FcmSendRequest,
+) -> FcmSendResponse:
+    """
+    Send a data-only FCM push for a notification
+    that has already been created in Firestore.
+
+    This endpoint does not create another
+    Firestore notification document.
+    """
+
+    try:
+
+        message_id = send_push_to_user(
+            user_id=request.userId,
+            notification_type=request.type,
+            title=request.title,
+            message=request.message,
+            notification_id=request.notificationId,
+            student_id=request.studentId,
+        )
+
+        return FcmSendResponse(
+            success=True,
+            messageId=message_id,
+        )
+
+    except ValueError as exc:
+
+        logger.warning(
+            "FCM send request rejected: %s",
+            exc,
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail=str(exc),
+        ) from exc
+
+    except Exception:
+
+        logger.exception(
+            "Unexpected error while sending FCM push."
+        )
+
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail="Failed to send FCM notification.",
+        )
+
+
+# ============================================================
 # Test FCM Push
 # ============================================================
 
@@ -46,9 +106,6 @@ def send_test_push(
 
     IMPORTANT:
     This endpoint does NOT create a Firestore notification.
-
-    Production notifications must go through
-    notification_service.create_and_send_notification().
     """
 
     try:
@@ -62,12 +119,10 @@ def send_test_push(
             student_id=request.studentId,
         )
 
-
         return FcmSendResponse(
             success=True,
             messageId=message_id,
         )
-
 
     except ValueError as exc:
 
@@ -76,19 +131,16 @@ def send_test_push(
             exc,
         )
 
-
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=str(exc),
         ) from exc
-
 
     except Exception:
 
         logger.exception(
             "Unexpected error while sending test FCM push."
         )
-
 
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

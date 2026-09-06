@@ -144,7 +144,7 @@ def create_and_send_notification(
             else None
         ),
         "createdAt": firestore.SERVER_TIMESTAMP,
-        "isRead": False,
+        "read": False,
     }
 
 
