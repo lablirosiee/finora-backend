@@ -1,8 +1,9 @@
 import pickle
 
-from datetime import date, timedelta
+from datetime import datetime, timedelta
 from functools import lru_cache
 from typing import Any, Tuple
+from zoneinfo import ZoneInfo
 
 import numpy as np
 from tensorflow.keras.models import load_model
@@ -191,6 +192,9 @@ def calculate_risk_level(
     if predicted_days <= 14:
         return "MODERATE"
 
+    if current_allowance <= 0:
+        return "UNKNOWN"
+
     allowance_ratio = (
         current_remaining
         / current_allowance
@@ -251,8 +255,13 @@ def generate_forecast(
             f"{model_shape}"
         )
 
-    expected_sequence_length = model_shape[1]
-    expected_feature_count = model_shape[2]
+    expected_sequence_length = (
+        model_shape[1]
+    )
+
+    expected_feature_count = (
+        model_shape[2]
+    )
 
     if (
         expected_sequence_length is not None
@@ -316,8 +325,12 @@ def generate_forecast(
     # Estimated Depletion Date
     # ========================================================
 
+    philippine_today = datetime.now(
+        ZoneInfo("Asia/Manila")
+    ).date()
+
     estimated_depletion_date = (
-        date.today()
+        philippine_today
         + timedelta(
             days=predicted_days
         )
