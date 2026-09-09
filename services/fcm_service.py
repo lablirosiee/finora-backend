@@ -1,9 +1,10 @@
 import logging
-import os
 from typing import Final
 
 import firebase_admin
 from firebase_admin import credentials, firestore, messaging
+
+from config import FIREBASE_SERVICE_ACCOUNT_PATH
 
 
 # ============================================================
@@ -17,10 +18,7 @@ logger = logging.getLogger(__name__)
 # Firebase Configuration
 # ============================================================
 
-SERVICE_ACCOUNT_PATH: Final[str] = os.getenv(
-    "FIREBASE_SERVICE_ACCOUNT_PATH",
-    "/etc/secrets/firebase-service-account.json",
-).strip()
+SERVICE_ACCOUNT_PATH = FIREBASE_SERVICE_ACCOUNT_PATH
 
 
 # ============================================================
@@ -30,7 +28,10 @@ SERVICE_ACCOUNT_PATH: Final[str] = os.getenv(
 USERS_COLLECTION: Final[str] = "users"
 
 FIELD_FCM_TOKEN: Final[str] = "fcmToken"
-FIELD_FCM_TOKEN_UPDATED_AT: Final[str] = "fcmTokenUpdatedAt"
+
+FIELD_FCM_TOKEN_UPDATED_AT: Final[str] = (
+    "fcmTokenUpdatedAt"
+)
 
 
 # ============================================================
@@ -40,17 +41,47 @@ FIELD_FCM_TOKEN_UPDATED_AT: Final[str] = "fcmTokenUpdatedAt"
 # These must stay aligned with NotificationHelper.kt.
 # ============================================================
 
-TYPE_LINK_REQUEST: Final[str] = "LINK_REQUEST"
-TYPE_LINK_APPROVED: Final[str] = "LINK_APPROVED"
-TYPE_LINK_DECLINED: Final[str] = "LINK_DECLINED"
-TYPE_LINK_EXPIRED: Final[str] = "LINK_EXPIRED"
-TYPE_ACCOUNT_UNLINKED: Final[str] = "ACCOUNT_UNLINKED"
+TYPE_LINK_REQUEST: Final[str] = (
+    "LINK_REQUEST"
+)
 
-TYPE_ALLOWANCE_LOW: Final[str] = "ALLOWANCE_LOW"
-TYPE_UNUSUAL_SPENDING: Final[str] = "UNUSUAL_SPENDING"
-TYPE_FINANCIAL_RISK: Final[str] = "FINANCIAL_RISK"
-TYPE_BUDGET_EXCEEDED: Final[str] = "BUDGET_EXCEEDED"
-TYPE_FORECAST_UPDATE: Final[str] = "FORECAST_UPDATE"
+TYPE_LINK_APPROVED: Final[str] = (
+    "LINK_APPROVED"
+)
+
+TYPE_LINK_DECLINED: Final[str] = (
+    "LINK_DECLINED"
+)
+
+TYPE_LINK_EXPIRED: Final[str] = (
+    "LINK_EXPIRED"
+)
+
+TYPE_ACCOUNT_UNLINKED: Final[str] = (
+    "ACCOUNT_UNLINKED"
+)
+
+
+TYPE_ALLOWANCE_LOW: Final[str] = (
+    "ALLOWANCE_LOW"
+)
+
+TYPE_UNUSUAL_SPENDING: Final[str] = (
+    "UNUSUAL_SPENDING"
+)
+
+TYPE_FINANCIAL_RISK: Final[str] = (
+    "FINANCIAL_RISK"
+)
+
+TYPE_BUDGET_EXCEEDED: Final[str] = (
+    "BUDGET_EXCEEDED"
+)
+
+TYPE_FORECAST_UPDATE: Final[str] = (
+    "FORECAST_UPDATE"
+)
+
 
 TYPE_STUDENT_ALLOWANCE_LOW: Final[str] = (
     "STUDENT_ALLOWANCE_LOW"
@@ -64,11 +95,19 @@ TYPE_STUDENT_FINANCIAL_RISK: Final[str] = (
     "STUDENT_FINANCIAL_RISK"
 )
 
-TYPE_DAILY_REMINDER: Final[str] = "DAILY_REMINDER"
-TYPE_INACTIVITY_REMINDER: Final[str] = "INACTIVITY_REMINDER"
+
+TYPE_DAILY_REMINDER: Final[str] = (
+    "DAILY_REMINDER"
+)
+
+TYPE_INACTIVITY_REMINDER: Final[str] = (
+    "INACTIVITY_REMINDER"
+)
 
 
-VALID_NOTIFICATION_TYPES: Final[frozenset[str]] = frozenset(
+VALID_NOTIFICATION_TYPES: Final[
+    frozenset[str]
+] = frozenset(
     {
         TYPE_LINK_REQUEST,
         TYPE_LINK_APPROVED,
@@ -100,11 +139,21 @@ def initialize_firebase() -> None:
     """
     Initialize Firebase Admin SDK once.
 
-    On Render, the service account file should normally be:
-    /etc/secrets/firebase-service-account.json
+    Local development:
+        Uses the Firebase service-account path configured
+        by config.py.
+
+    Render:
+        FIREBASE_SERVICE_ACCOUNT_PATH should point to:
+        /etc/secrets/firebase-service-account.json
     """
 
+    # --------------------------------------------------------
+    # Check whether Firebase is already initialized
+    # --------------------------------------------------------
+
     try:
+
         firebase_admin.get_app()
 
         logger.debug(
@@ -114,20 +163,15 @@ def initialize_firebase() -> None:
         return
 
     except ValueError:
-        # No Firebase app exists yet.
+        # No Firebase application exists yet.
         pass
 
 
-    if not SERVICE_ACCOUNT_PATH:
+    # --------------------------------------------------------
+    # Check Firebase service account
+    # --------------------------------------------------------
 
-        raise RuntimeError(
-            "FIREBASE_SERVICE_ACCOUNT_PATH is not configured."
-        )
-
-
-    if not os.path.isfile(
-        SERVICE_ACCOUNT_PATH
-    ):
+    if not SERVICE_ACCOUNT_PATH.exists():
 
         raise RuntimeError(
             "Firebase service account file is missing at: "
@@ -135,17 +179,19 @@ def initialize_firebase() -> None:
         )
 
 
+    # --------------------------------------------------------
+    # Initialize Firebase
+    # --------------------------------------------------------
+
     try:
 
         credential = credentials.Certificate(
-            SERVICE_ACCOUNT_PATH
+            str(SERVICE_ACCOUNT_PATH)
         )
-
 
         firebase_admin.initialize_app(
             credential
         )
-
 
         logger.info(
             "Firebase Admin SDK initialized successfully."
@@ -215,8 +261,10 @@ def validate_notification_type(
             If the type is empty or unsupported.
     """
 
-    normalized_type = normalize_notification_type(
-        notification_type
+    normalized_type = (
+        normalize_notification_type(
+            notification_type
+        )
     )
 
 
@@ -407,7 +455,9 @@ def clear_invalid_fcm_token(
             transaction.update(
                 user_reference,
                 {
-                    FIELD_FCM_TOKEN: "",
+                    FIELD_FCM_TOKEN:
+                        "",
+
                     FIELD_FCM_TOKEN_UPDATED_AT:
                         firestore.SERVER_TIMESTAMP,
                 },
@@ -429,12 +479,12 @@ def clear_invalid_fcm_token(
             normalized_user_id,
         )
 
+
     except Exception:
 
-        
-         #Token cleanup must never cause the original push
-         #operation to fail differently.
-         
+        # Token cleanup must never cause the original push
+        # operation to fail differently.
+
         logger.exception(
             "Failed to clear invalid FCM token for user %s.",
             normalized_user_id,
@@ -536,6 +586,7 @@ def send_push_to_user(
     # --------------------------------------------------------
 
     data = {
+
         "type":
             normalized_type,
 
@@ -545,11 +596,10 @@ def send_push_to_user(
         "body":
             normalized_message,
 
-    
-         # Keep "message" temporarily for compatibility with
-         # the Android receiver, which currently supports both
-         #"body" and "message".
-         
+        # Keep "message" temporarily for compatibility with
+        # the Android receiver, which currently supports both
+        # "body" and "message".
+
         "message":
             normalized_message,
 
@@ -566,8 +616,11 @@ def send_push_to_user(
     # --------------------------------------------------------
 
     push_message = messaging.Message(
+
         token=fcm_token,
+
         data=data,
+
         android=messaging.AndroidConfig(
             priority="high",
         ),
@@ -588,6 +641,7 @@ def send_push_to_user(
         logger.info(
             "FCM notification sent successfully. "
             "userId=%s type=%s notificationId=%s",
+
             normalized_user_id,
             normalized_type,
             normalized_notification_id
@@ -624,6 +678,7 @@ def send_push_to_user(
         logger.exception(
             "Failed to send FCM notification. "
             "userId=%s type=%s",
+
             normalized_user_id,
             normalized_type,
         )

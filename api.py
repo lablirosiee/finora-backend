@@ -5,6 +5,7 @@ from routes.fcm_routes import router as fcm_router
 from routes.profile_routes import router as profile_router
 from routes.auth_routes import router as auth_router
 from routes.notification_routes import router as notification_router
+from routes.forecast_routes import router as forecast_router
 
 
 # ============================================================
@@ -44,6 +45,10 @@ app.include_router(
 
 app.include_router(
     notification_router
+)
+
+app.include_router(
+    forecast_router
 )
 
 
