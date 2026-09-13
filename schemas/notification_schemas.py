@@ -1,4 +1,8 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    field_validator,
+)
 
 
 # ============================================================
@@ -7,11 +11,16 @@ from pydantic import BaseModel, Field, field_validator
 
 class NotificationEventRequest(BaseModel):
     """
-    Request sent by the authenticated Android app when a
-    legitimate Finora event needs a notification.
+    Request sent by the authenticated Android app when the
+    current Finora user experiences an own-finance event.
 
-    The backend will determine the final title, message,
-    notification type, and recipient rules.
+    The backend determines:
+        - recipient
+        - title
+        - message
+        - canonical notification type
+
+    Android must not choose an arbitrary notification recipient.
     """
 
     eventType: str = Field(
@@ -19,18 +28,12 @@ class NotificationEventRequest(BaseModel):
         min_length=1,
     )
 
-    targetUserId: str = Field(
-        default="",
-    )
-
     studentId: str = Field(
         default="",
     )
 
-
     @field_validator(
         "eventType",
-        "targetUserId",
         "studentId",
         mode="before",
     )
@@ -39,7 +42,12 @@ class NotificationEventRequest(BaseModel):
         cls,
         value,
     ):
-        if isinstance(value, str):
+
+        if isinstance(
+            value,
+            str,
+        ):
+
             return value.strip()
 
         return value
@@ -50,7 +58,11 @@ class NotificationEventRequest(BaseModel):
 # ============================================================
 
 class NotificationEventResponse(BaseModel):
+
     success: bool
+
     notificationId: str | None = None
+
     skipped: bool = False
+
     message: str

@@ -1,4 +1,8 @@
-from pydantic import BaseModel, Field, field_validator
+from pydantic import (
+    BaseModel,
+    Field,
+    field_validator,
+)
 
 
 # ============================================================
@@ -7,11 +11,11 @@ from pydantic import BaseModel, Field, field_validator
 
 class FcmSendRequest(BaseModel):
     """
-    Request model used by the FCM test endpoint.
+    Request model used only by the authenticated FCM testing
+    endpoint.
 
-    This endpoint is for testing push delivery only.
-    Production notifications should use the notification
-    service instead.
+    Production Finora notifications should use
+    notification_service.py instead.
     """
 
     userId: str = Field(
@@ -35,8 +39,8 @@ class FcmSendRequest(BaseModel):
     )
 
     notificationId: str = ""
-    studentId: str = ""
 
+    studentId: str = ""
 
     @field_validator(
         "userId",
@@ -53,11 +57,14 @@ class FcmSendRequest(BaseModel):
         value,
     ):
         """
-        Remove accidental leading/trailing spaces from
-        incoming string values.
+        Remove accidental leading/trailing spaces.
         """
 
-        if isinstance(value, str):
+        if isinstance(
+            value,
+            str,
+        ):
+
             return value.strip()
 
         return value
@@ -68,6 +75,7 @@ class FcmSendRequest(BaseModel):
 # ============================================================
 
 class FcmSendResponse(BaseModel):
+
     success: bool
 
     messageId: str

@@ -6,6 +6,7 @@ from routes.profile_routes import router as profile_router
 from routes.auth_routes import router as auth_router
 from routes.notification_routes import router as notification_router
 from routes.forecast_routes import router as forecast_router
+from routes.link_routes import router as link_router
 
 
 # ============================================================
@@ -49,6 +50,10 @@ app.include_router(
 
 app.include_router(
     forecast_router
+)
+
+app.include_router(
+    link_router
 )
 
 
