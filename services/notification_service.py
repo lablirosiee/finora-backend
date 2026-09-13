@@ -387,39 +387,34 @@ def has_recent_notification(
     within_hours: int = 24,
 ) -> bool:
     """
-    Check whether an equivalent notification already exists
-    within the specified number of hours.
+    Check whether an equivalent recent notification already exists.
 
-    This prevents repeated notifications when financial data is
-    recalculated several times.
+    Deduplication:
+        Own-finance / linking:
+            userId + type
 
-    Own-finance deduplication:
-        userId + type
+        Provider monitoring:
+            userId + type + studentId
 
-    Provider-monitoring deduplication:
-        provider userId + type + studentId
+    This implementation intentionally avoids a Firestore compound
+    query so a composite index is not required for notification
+    deduplication.
     """
 
     # --------------------------------------------------------
     # Normalize
     # --------------------------------------------------------
 
-    normalized_user_id = (
-        _normalize_text(
-            user_id
-        )
+    normalized_user_id = _normalize_text(
+        user_id
     )
 
-    normalized_type = (
-        validate_notification_type(
-            notification_type
-        )
+    normalized_type = validate_notification_type(
+        notification_type
     )
 
-    normalized_student_id = (
-        _normalize_text(
-            student_id
-        )
+    normalized_student_id = _normalize_text(
+        student_id
     )
 
     # --------------------------------------------------------
@@ -427,25 +422,19 @@ def has_recent_notification(
     # --------------------------------------------------------
 
     if not normalized_user_id:
-
         raise ValueError(
             "Target user ID is required."
         )
 
-    if (
-        within_hours <= 0
-    ):
-
+    if within_hours <= 0:
         raise ValueError(
             "within_hours must be greater than zero."
         )
 
     if (
-        normalized_type
-        in STUDENT_MONITORING_TYPES
+        normalized_type in STUDENT_MONITORING_TYPES
         and not normalized_student_id
     ):
-
         raise ValueError(
             "studentId is required when checking a "
             "provider-side monitoring notification."
@@ -456,67 +445,108 @@ def has_recent_notification(
     # --------------------------------------------------------
 
     cutoff = (
-        datetime.now(
-            timezone.utc
-        )
-        - timedelta(
-            hours=within_hours
-        )
+        datetime.now(timezone.utc)
+        - timedelta(hours=within_hours)
     )
 
     # --------------------------------------------------------
     # Firestore Query
+    #
+    # Query only by userId.
+    # Remaining deduplication is performed in Python to avoid
+    # requiring a Firestore composite index.
     # --------------------------------------------------------
 
     db = firestore.client()
 
-    query = (
-        db.collection(
-            NOTIFICATIONS_COLLECTION
-        )
-        .where(
-            "userId",
-            "==",
-            normalized_user_id,
-        )
-        .where(
-            "type",
-            "==",
-            normalized_type,
-        )
-        .where(
-            "createdAt",
-            ">=",
-            cutoff,
-        )
-    )
-
-    # Provider monitoring deduplication must be specific
-    # to the linked Student.
-
-    if normalized_student_id:
-
-        query = query.where(
-            "studentId",
-            "==",
-            normalized_student_id,
-        )
-
     try:
 
         documents = (
-            query
-            .limit(1)
+            db.collection(
+                NOTIFICATIONS_COLLECTION
+            )
+            .where(
+                "userId",
+                "==",
+                normalized_user_id,
+            )
+            .limit(100)
             .stream()
         )
 
-        return (
-            next(
-                documents,
-                None,
+        for document in documents:
+
+            data = document.to_dict() or {}
+
+            stored_type = _normalize_text(
+                data.get("type")
             )
-            is not None
-        )
+
+            if stored_type != normalized_type:
+                continue
+
+            # ------------------------------------------------
+            # Compare studentId when one is part of the event
+            # ------------------------------------------------
+
+            if normalized_student_id:
+
+                stored_student_id = _normalize_text(
+                    data.get("studentId")
+                )
+
+                if (
+                    stored_student_id
+                    != normalized_student_id
+                ):
+                    continue
+
+            # ------------------------------------------------
+            # Check creation timestamp
+            # ------------------------------------------------
+
+            created_at = data.get(
+                "createdAt"
+            )
+
+            if created_at is None:
+                continue
+
+            try:
+
+                if created_at.tzinfo is None:
+                    created_at = created_at.replace(
+                        tzinfo=timezone.utc
+                    )
+
+                if created_at >= cutoff:
+
+                    logger.info(
+                        "Recent duplicate notification found. "
+                        "userId=%s type=%s studentId=%s",
+                        normalized_user_id,
+                        normalized_type,
+                        normalized_student_id
+                        or "<none>",
+                    )
+
+                    return True
+
+            except (
+                AttributeError,
+                TypeError,
+                ValueError,
+            ):
+
+                logger.warning(
+                    "Skipping notification %s because "
+                    "createdAt is invalid.",
+                    document.id,
+                )
+
+                continue
+
+        return False
 
     except Exception as exc:
 
