@@ -10,39 +10,55 @@ from dotenv import load_dotenv
 
 ROOT_DIR = Path(__file__).resolve().parent
 
-load_dotenv(ROOT_DIR / ".env")
+load_dotenv(
+    ROOT_DIR / ".env"
+)
 
 
 # ============================================================
-# GRU Forecast Configuration
+# V8 Two-Stage GRU Forecast Configuration
 # ============================================================
 
-MODEL_PATH = (
+CLASSIFIER_MODEL_PATH = (
     ROOT_DIR
     / "models"
-    / "finora_gru_model.h5"
+    / "finora_depletion_classifier.h5"
+)
+
+REGRESSOR_MODEL_PATH = (
+    ROOT_DIR
+    / "models"
+    / "finora_depletion_regressor.h5"
 )
 
 SCALER_PATH = (
     ROOT_DIR
     / "models"
-    / "scaler.pkl"
+    / "scaler_v8.pkl"
 )
 
 
 FEATURE_COLUMNS = [
-    "dailyExpense",
+    "transactionAmount",
     "remainingAllowance",
     "essentialExpense",
     "nonEssentialExpense",
+    "daysSincePreviousExpense",
     "daysUntilNextAllowance",
     "allowanceAmount",
+    "percentageAllowanceUsed",
 ]
 
 
-SEQUENCE_LENGTH = 30
+MIN_DISTINCT_EXPENSE_DAYS = 3
 
-HISTORY_LENGTH = 30
+MIN_TRANSACTIONS = 5
+
+MAX_SEQUENCE_LENGTH = 10
+
+MASK_VALUE = -1.0
+
+DEPLETION_THRESHOLD = 0.21
 
 
 # ============================================================

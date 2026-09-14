@@ -1,16 +1,20 @@
-from typing import List
+from datetime import date
+from typing import List, Optional
 
 from pydantic import BaseModel, Field
 
 
 # ============================================================
-# Daily Spending History
+# Transaction Spending History
 # ============================================================
 
 class HistoryEntry(BaseModel):
-    dailyExpense: float = Field(
+
+    date: date
+
+    transactionAmount: float = Field(
         ...,
-        ge=0,
+        gt=0,
     )
 
     remainingAllowance: float = Field(
@@ -28,6 +32,11 @@ class HistoryEntry(BaseModel):
         ge=0,
     )
 
+    daysSincePreviousExpense: int = Field(
+        ...,
+        ge=0,
+    )
+
     daysUntilNextAllowance: int = Field(
         ...,
         ge=0,
@@ -38,22 +47,22 @@ class HistoryEntry(BaseModel):
         gt=0,
     )
 
+    percentageAllowanceUsed: float = Field(
+        ...,
+        ge=0,
+    )
+
 
 # ============================================================
 # Forecast Request
 # ============================================================
 
 class ForecastRequest(BaseModel):
-    recentHistory: List[HistoryEntry]
 
-    currentRemainingAllowance: float = Field(
+    recentHistory: List[HistoryEntry] = Field(
         ...,
-        ge=0,
-    )
-
-    currentAllowanceAmount: float = Field(
-        ...,
-        gt=0,
+        min_length=5,
+        max_length=10,
     )
 
 
@@ -62,9 +71,14 @@ class ForecastRequest(BaseModel):
 # ============================================================
 
 class ForecastResponse(BaseModel):
-    predicted_days_until_depletion: int
 
-    estimated_depletion_date: str
+    depletion_expected_before_next_allowance: bool
+
+    predicted_days_until_depletion: Optional[int] = None
+
+    estimated_depletion_date: Optional[str] = None
+
+    next_allowance_date: str
 
     risk_level: str
 
@@ -74,8 +88,11 @@ class ForecastResponse(BaseModel):
 # ============================================================
 
 class ForecastHealthResponse(BaseModel):
+
     status: str
 
-    model_exists: bool
+    classifier_exists: bool
+
+    regressor_exists: bool
 
     scaler_exists: bool

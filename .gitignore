@@ -32,7 +32,9 @@ scripts/dataset/
 # ============================================================
 
 outputs/
+outputs_v8/
 scripts/outputs/
+scripts/outputs_v8/
 
 # ============================================================
 # Training / Development Scripts

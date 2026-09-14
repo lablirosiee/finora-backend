@@ -17,10 +17,10 @@ app = FastAPI(
     title="Finora API",
     description=(
         "Backend API for Finora authentication, OTP, "
-        "profile services, notifications, FCM, and "
-        "forecasting."
+        "profile services, notifications, FCM, linking, "
+        "and two-stage GRU allowance forecasting."
     ),
-    version="1.0.0",
+    version="2.0.0",
 )
 
 
@@ -65,6 +65,7 @@ app.include_router(
 def root():
     return {
         "message": "Finora API is running.",
+        "version": "2.0.0",
         "documentation": "/docs",
     }
 
@@ -78,4 +79,5 @@ def health_check():
     return {
         "status": "ok",
         "service": "Finora API",
+        "version": "2.0.0",
     }

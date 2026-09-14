@@ -1,12 +1,24 @@
-from fastapi import APIRouter, HTTPException, status
+from fastapi import (
+    APIRouter,
+    HTTPException,
+    status,
+)
 
-from config import MODEL_PATH, SCALER_PATH
+from config import (
+    CLASSIFIER_MODEL_PATH,
+    REGRESSOR_MODEL_PATH,
+    SCALER_PATH,
+)
+
 from schemas.forecast_schemas import (
     ForecastHealthResponse,
     ForecastRequest,
     ForecastResponse,
 )
-from services.forecast_service import generate_forecast
+
+from services.forecast_service import (
+    generate_forecast,
+)
 
 
 router = APIRouter(
@@ -26,14 +38,44 @@ router = APIRouter(
 )
 def forecast_health_check() -> ForecastHealthResponse:
     """
-    Checks whether the GRU model and scaler files
-    are available to the backend.
+    Checks whether both Finora V8 GRU models
+    and the scaler are available.
     """
 
+    classifier_exists = (
+        CLASSIFIER_MODEL_PATH.exists()
+    )
+
+    regressor_exists = (
+        REGRESSOR_MODEL_PATH.exists()
+    )
+
+    scaler_exists = (
+        SCALER_PATH.exists()
+    )
+
+    all_available = (
+        classifier_exists
+        and regressor_exists
+        and scaler_exists
+    )
+
     return ForecastHealthResponse(
-        status="ok",
-        model_exists=MODEL_PATH.exists(),
-        scaler_exists=SCALER_PATH.exists(),
+        status=(
+            "ok"
+            if all_available
+            else "unavailable"
+        ),
+
+        classifier_exists=(
+            classifier_exists
+        ),
+
+        regressor_exists=(
+            regressor_exists
+        ),
+
+        scaler_exists=scaler_exists,
     )
 
 
@@ -50,38 +92,57 @@ def forecast_allowance(
     request: ForecastRequest,
 ) -> ForecastResponse:
     """
-    Generates an allowance depletion forecast
-    using the trained Finora GRU model.
+    Generates Finora's two-stage allowance forecast.
 
-    Expected output:
-    - predicted_days_until_depletion
-    - estimated_depletion_date
-    - risk_level
+    Stage 1:
+    Predict whether the current allowance is
+    expected to deplete before the next allowance.
+
+    Stage 2:
+    If depletion is expected, predict the number
+    of days until depletion.
+
+    Eligibility:
+    - 5 to 10 recent transactions
+    - at least 3 distinct expense days
     """
 
     try:
-        return generate_forecast(request)
+        return generate_forecast(
+            request
+        )
 
     except FileNotFoundError as exc:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=(
+                status.HTTP_500_INTERNAL_SERVER_ERROR
+            ),
             detail=str(exc),
         ) from exc
 
     except ValueError as exc:
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=(
+                status.HTTP_400_BAD_REQUEST
+            ),
             detail=str(exc),
         ) from exc
 
     except RuntimeError as exc:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            status_code=(
+                status.HTTP_500_INTERNAL_SERVER_ERROR
+            ),
             detail=str(exc),
         ) from exc
 
     except Exception as exc:
         raise HTTPException(
-            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail=f"Forecast generation failed: {exc}",
+            status_code=(
+                status.HTTP_500_INTERNAL_SERVER_ERROR
+            ),
+            detail=(
+                "Forecast generation failed: "
+                f"{exc}"
+            ),
         ) from exc
