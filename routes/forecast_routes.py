@@ -80,7 +80,7 @@ def forecast_health_check() -> ForecastHealthResponse:
 
 
 # ============================================================
-# Allowance Forecast
+# Real Allowance Forecast
 # ============================================================
 
 @router.post(
@@ -92,7 +92,7 @@ def forecast_allowance(
     request: ForecastRequest,
 ) -> ForecastResponse:
     """
-    Generates Finora's two-stage allowance forecast.
+    Generates Finora's real two-stage allowance forecast.
 
     Stage 1:
     Predict whether the current allowance is
@@ -143,6 +143,80 @@ def forecast_allowance(
             ),
             detail=(
                 "Forecast generation failed: "
+                f"{exc}"
+            ),
+        ) from exc
+
+
+# ============================================================
+# What-If Simulation Forecast
+# ============================================================
+
+@router.post(
+    "/simulate",
+    response_model=ForecastResponse,
+    status_code=status.HTTP_200_OK,
+)
+def simulate_allowance(
+    request: ForecastRequest,
+) -> ForecastResponse:
+    """
+    Generates a hypothetical allowance forecast using
+    the SAME Finora V8 Two-Stage GRU models.
+
+    The Android application may include a hypothetical
+    transaction as the final entry in recentHistory.
+
+    IMPORTANT:
+    This endpoint performs inference only.
+
+    It does not:
+    - save an expense
+    - modify an allowance
+    - save a forecast
+    - modify Firestore
+    - modify Room
+
+    Therefore, simulation results cannot overwrite the
+    user's actual financial forecast.
+    """
+
+    try:
+        return generate_forecast(
+            request
+        )
+
+    except FileNotFoundError as exc:
+        raise HTTPException(
+            status_code=(
+                status.HTTP_500_INTERNAL_SERVER_ERROR
+            ),
+            detail=str(exc),
+        ) from exc
+
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=(
+                status.HTTP_400_BAD_REQUEST
+            ),
+            detail=str(exc),
+        ) from exc
+
+    except RuntimeError as exc:
+        raise HTTPException(
+            status_code=(
+                status.HTTP_500_INTERNAL_SERVER_ERROR
+            ),
+            detail=str(exc),
+        ) from exc
+
+    except Exception as exc:
+        raise HTTPException(
+            status_code=(
+                status.HTTP_500_INTERNAL_SERVER_ERROR
+            ),
+            detail=(
+                "Simulation forecast generation failed: "
                 f"{exc}"
             ),
         ) from exc
