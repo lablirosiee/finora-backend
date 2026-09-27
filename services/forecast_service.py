@@ -1,4 +1,5 @@
 import pickle
+import time
 
 from datetime import datetime, timedelta
 from functools import lru_cache
@@ -54,6 +55,18 @@ def load_model_artifacts() -> Tuple[
     Any,
     Any,
 ]:
+    """
+    Loads the V8 classifier, regressor, and scaler.
+
+    This function is called through get_artifacts(),
+    which caches the loaded artifacts so they are not
+    reloaded for every forecast request.
+    """
+
+    print(
+        "[FORECAST] Checking model artifacts...",
+        flush=True,
+    )
 
     if not CLASSIFIER_MODEL_PATH.exists():
         raise FileNotFoundError(
@@ -72,9 +85,37 @@ def load_model_artifacts() -> Tuple[
             f"Scaler not found: {SCALER_PATH}"
         )
 
+    # ========================================================
+    # Classifier
+    # ========================================================
+
+    classifier_start = time.perf_counter()
+
+    print(
+        "[FORECAST] Loading classifier model...",
+        flush=True,
+    )
+
     classifier = load_model(
         str(CLASSIFIER_MODEL_PATH),
         compile=False,
+    )
+
+    print(
+        "[FORECAST] Classifier loaded in "
+        f"{time.perf_counter() - classifier_start:.2f}s",
+        flush=True,
+    )
+
+    # ========================================================
+    # Regressor
+    # ========================================================
+
+    regressor_start = time.perf_counter()
+
+    print(
+        "[FORECAST] Loading regressor model...",
+        flush=True,
     )
 
     regressor = load_model(
@@ -82,8 +123,31 @@ def load_model_artifacts() -> Tuple[
         compile=False,
     )
 
+    print(
+        "[FORECAST] Regressor loaded in "
+        f"{time.perf_counter() - regressor_start:.2f}s",
+        flush=True,
+    )
+
+    # ========================================================
+    # Scaler
+    # ========================================================
+
+    scaler_start = time.perf_counter()
+
+    print(
+        "[FORECAST] Loading scaler...",
+        flush=True,
+    )
+
     with SCALER_PATH.open("rb") as file:
         scaler = pickle.load(file)
+
+    print(
+        "[FORECAST] Scaler loaded in "
+        f"{time.perf_counter() - scaler_start:.2f}s",
+        flush=True,
+    )
 
     return (
         classifier,
@@ -102,6 +166,14 @@ def get_artifacts() -> Tuple[
     Any,
     Any,
 ]:
+    """
+    Returns cached V8 model artifacts.
+
+    On the first forecast request, the models and scaler
+    are loaded from disk.
+
+    Subsequent requests reuse the same loaded objects.
+    """
 
     return load_model_artifacts()
 
@@ -254,9 +326,13 @@ def build_input_sequence(
     scaler,
 ) -> np.ndarray:
 
-    validate_history(request)
+    validate_history(
+        request
+    )
 
-    verify_scaler(scaler)
+    verify_scaler(
+        scaler
+    )
 
     raw_sequence = np.asarray(
         [
@@ -290,14 +366,15 @@ def build_input_sequence(
     # ========================================================
     # Scale REAL transaction rows only
     #
-    # IMPORTANT:
     # Padding must happen AFTER MinMax scaling.
     # ========================================================
 
     try:
         scaled_sequence = scaler.transform(
             raw_sequence
-        ).astype(np.float32)
+        ).astype(
+            np.float32
+        )
 
     except Exception as exc:
         raise ValueError(
@@ -307,7 +384,7 @@ def build_input_sequence(
     # ========================================================
     # Right-pad to 10 transactions
     #
-    # Example with 5 transactions:
+    # Example:
     #
     # TX1
     # TX2
@@ -376,11 +453,52 @@ def generate_forecast(
     request: ForecastRequest,
 ) -> ForecastResponse:
 
+    total_start = time.perf_counter()
+
+    print(
+        "[FORECAST] ========================================",
+        flush=True,
+    )
+
+    print(
+        "[FORECAST] Forecast request received.",
+        flush=True,
+    )
+
+    print(
+        "[FORECAST] Transaction count: "
+        f"{len(request.recentHistory)}",
+        flush=True,
+    )
+
+    # ========================================================
+    # Retrieve Cached Models / Load on First Request
+    # ========================================================
+
+    artifact_start = time.perf_counter()
+
+    print(
+        "[FORECAST] Retrieving model artifacts...",
+        flush=True,
+    )
+
     (
         classifier,
         regressor,
         scaler,
     ) = get_artifacts()
+
+    print(
+        "[FORECAST] Artifacts ready in "
+        f"{time.perf_counter() - artifact_start:.2f}s",
+        flush=True,
+    )
+
+    # ========================================================
+    # Verify Models
+    # ========================================================
+
+    verify_start = time.perf_counter()
 
     verify_model_shape(
         classifier,
@@ -392,18 +510,36 @@ def generate_forecast(
         "Regressor",
     )
 
+    print(
+        "[FORECAST] Model verification completed in "
+        f"{time.perf_counter() - verify_start:.2f}s",
+        flush=True,
+    )
+
+    # ========================================================
+    # Build Input Sequence
+    # ========================================================
+
+    input_start = time.perf_counter()
+
     padded_sequence = build_input_sequence(
         request,
         scaler,
     )
 
+    print(
+        "[FORECAST] Input sequence built in "
+        f"{time.perf_counter() - input_start:.2f}s",
+        flush=True,
+    )
+
     # ========================================================
-    # GRU input
+    # GRU Input
     #
     # Shape:
     # (batch, sequence, features)
     #
-    # V8 Finora:
+    # Finora V8:
     # (1, 10, 8)
     # ========================================================
 
@@ -411,6 +547,12 @@ def generate_forecast(
         1,
         MAX_SEQUENCE_LENGTH,
         len(FEATURE_COLUMNS),
+    )
+
+    print(
+        "[FORECAST] GRU input shape: "
+        f"{model_input.shape}",
+        flush=True,
     )
 
     # ========================================================
@@ -442,6 +584,17 @@ def generate_forecast(
 
     if latest_entry.remainingAllowance <= 0:
 
+        print(
+            "[FORECAST] Remaining allowance is zero.",
+            flush=True,
+        )
+
+        print(
+            "[FORECAST] Total processing time: "
+            f"{time.perf_counter() - total_start:.2f}s",
+            flush=True,
+        )
+
         return ForecastResponse(
             depletion_expected_before_next_allowance=True,
 
@@ -463,6 +616,14 @@ def generate_forecast(
     # Depletion Classification
     # ========================================================
 
+    classifier_start = time.perf_counter()
+
+    print(
+        "[FORECAST] Starting Stage 1 "
+        "classifier prediction...",
+        flush=True,
+    )
+
     try:
         classifier_output = classifier.predict(
             model_input,
@@ -474,6 +635,17 @@ def generate_forecast(
             "Depletion classifier "
             f"prediction failed: {exc}"
         ) from exc
+
+    classifier_duration = (
+        time.perf_counter()
+        - classifier_start
+    )
+
+    print(
+        "[FORECAST] Stage 1 prediction completed in "
+        f"{classifier_duration:.2f}s",
+        flush=True,
+    )
 
     depletion_probability = float(
         classifier_output.flatten()[0]
@@ -500,11 +672,46 @@ def generate_forecast(
         >= DEPLETION_THRESHOLD
     )
 
+    print(
+        "[FORECAST] Depletion probability: "
+        f"{depletion_probability:.6f}",
+        flush=True,
+    )
+
+    print(
+        "[FORECAST] Depletion threshold: "
+        f"{DEPLETION_THRESHOLD}",
+        flush=True,
+    )
+
+    print(
+        "[FORECAST] Depletion expected: "
+        f"{depletion_expected}",
+        flush=True,
+    )
+
     # ========================================================
     # STAGE 1 says NO
     # ========================================================
 
     if not depletion_expected:
+
+        print(
+            "[FORECAST] Stage 2 skipped because "
+            "depletion is not expected.",
+            flush=True,
+        )
+
+        print(
+            "[FORECAST] Total processing time: "
+            f"{time.perf_counter() - total_start:.2f}s",
+            flush=True,
+        )
+
+        print(
+            "[FORECAST] ========================================",
+            flush=True,
+        )
 
         return ForecastResponse(
             depletion_expected_before_next_allowance=False,
@@ -525,6 +732,14 @@ def generate_forecast(
     # Predict Days Until Depletion
     # ========================================================
 
+    regressor_start = time.perf_counter()
+
+    print(
+        "[FORECAST] Starting Stage 2 "
+        "regressor prediction...",
+        flush=True,
+    )
+
     try:
         regressor_output = regressor.predict(
             model_input,
@@ -537,6 +752,17 @@ def generate_forecast(
             f"prediction failed: {exc}"
         ) from exc
 
+    regressor_duration = (
+        time.perf_counter()
+        - regressor_start
+    )
+
+    print(
+        "[FORECAST] Stage 2 prediction completed in "
+        f"{regressor_duration:.2f}s",
+        flush=True,
+    )
+
     predicted_value = float(
         regressor_output.flatten()[0]
     )
@@ -548,6 +774,12 @@ def generate_forecast(
             "Depletion-day regressor returned "
             "a non-finite prediction."
         )
+
+    print(
+        "[FORECAST] Raw predicted depletion days: "
+        f"{predicted_value:.6f}",
+        flush=True,
+    )
 
     # ========================================================
     # Keep Prediction Inside Current Allowance Cycle
@@ -599,6 +831,39 @@ def generate_forecast(
     risk_level = calculate_risk_level(
         depletion_expected=True,
         predicted_days=predicted_days,
+    )
+
+    # ========================================================
+    # Logging
+    # ========================================================
+
+    print(
+        "[FORECAST] Predicted days until depletion: "
+        f"{predicted_days}",
+        flush=True,
+    )
+
+    print(
+        "[FORECAST] Estimated depletion date: "
+        f"{estimated_depletion_date.isoformat()}",
+        flush=True,
+    )
+
+    print(
+        "[FORECAST] Risk level: "
+        f"{risk_level}",
+        flush=True,
+    )
+
+    print(
+        "[FORECAST] Total processing time: "
+        f"{time.perf_counter() - total_start:.2f}s",
+        flush=True,
+    )
+
+    print(
+        "[FORECAST] ========================================",
+        flush=True,
     )
 
     # ========================================================
