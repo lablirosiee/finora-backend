@@ -18,6 +18,8 @@ from config import (
 from schemas.forecast_schemas import (
     ForecastRequest,
     ForecastResponse,
+    HistoryEntry,
+    SimulationRequest,
 )
 
 
@@ -383,19 +385,6 @@ def build_input_sequence(
 
     # ========================================================
     # Right-pad to 10 transactions
-    #
-    # Example:
-    #
-    # TX1
-    # TX2
-    # TX3
-    # TX4
-    # TX5
-    # PAD
-    # PAD
-    # PAD
-    # PAD
-    # PAD
     # ========================================================
 
     padded_sequence = np.full(
@@ -446,7 +435,7 @@ def calculate_risk_level(
 
 
 # ============================================================
-# Generate Forecast
+# Generate Real Forecast
 # ============================================================
 
 def generate_forecast(
@@ -887,3 +876,361 @@ def generate_forecast(
 
         risk_level=risk_level,
     )
+
+
+# ============================================================
+# Generate What-If Simulation Forecast
+# ============================================================
+
+def generate_simulation_forecast(
+    request: SimulationRequest,
+) -> ForecastResponse:
+    """
+    Generates a hypothetical allowance forecast using the
+    SAME Finora V8 Two-Stage GRU pipeline.
+
+    The user's real transaction history remains unchanged.
+    A hypothetical transaction is created only in memory.
+
+    This function does NOT:
+    - save an expense
+    - update Room
+    - update Firestore
+    - modify the user's allowance
+    - overwrite the user's real forecast
+    """
+
+    print(
+        "[SIMULATION] ========================================",
+        flush=True,
+    )
+
+    print(
+        "[SIMULATION] What-If simulation requested.",
+        flush=True,
+    )
+
+    # ========================================================
+    # Validate Existing History
+    # ========================================================
+
+    history = request.recentHistory
+
+    if len(history) < MIN_TRANSACTIONS:
+        raise ValueError(
+            "Simulation requires at least "
+            f"{MIN_TRANSACTIONS} existing expense transactions."
+        )
+
+    if len(history) > MAX_SEQUENCE_LENGTH:
+        raise ValueError(
+            "Simulation accepts at most "
+            f"{MAX_SEQUENCE_LENGTH} recent transactions."
+        )
+
+    # ========================================================
+    # Validate Planned Expense
+    # ========================================================
+
+    planned_amount = float(
+        request.plannedExpenseAmount
+    )
+
+    if planned_amount <= 0:
+        raise ValueError(
+            "Planned expense amount must be greater than zero."
+        )
+
+    # ========================================================
+    # Normalize Category
+    # ========================================================
+
+    normalized_category = (
+        request.category
+        .strip()
+        .lower()
+        .replace("_", "-")
+        .replace(" ", "-")
+    )
+
+    if normalized_category == "essential":
+        is_essential = True
+
+    elif normalized_category in {
+        "non-essential",
+        "nonessential",
+    }:
+        is_essential = False
+
+    else:
+        raise ValueError(
+            "Simulation category must be either "
+            "'Essential' or 'Non-Essential'."
+        )
+
+    # ========================================================
+    # Latest Actual Financial State
+    # ========================================================
+
+    latest_entry = history[-1]
+
+    allowance_amount = float(
+        latest_entry.allowanceAmount
+    )
+
+    current_remaining = float(
+        latest_entry.remainingAllowance
+    )
+
+    if allowance_amount <= 0:
+        raise ValueError(
+            "Allowance amount must be greater than zero."
+        )
+
+    # ========================================================
+    # Hypothetical Remaining Allowance
+    # ========================================================
+
+    hypothetical_remaining = max(
+        0.0,
+        current_remaining - planned_amount,
+    )
+
+    # ========================================================
+    # Hypothetical Essential / Non-Essential Value
+    #
+    # These remain TRANSACTION-LEVEL features because that is
+    # the same structure expected by the trained V8 model.
+    # ========================================================
+
+    hypothetical_essential = (
+        planned_amount
+        if is_essential
+        else 0.0
+    )
+
+    hypothetical_non_essential = (
+        planned_amount
+        if not is_essential
+        else 0.0
+    )
+
+    # ========================================================
+    # Percentage Allowance Used AFTER Planned Expense
+    # ========================================================
+
+    hypothetical_percentage_used = (
+        (
+            allowance_amount
+            - hypothetical_remaining
+        )
+        / allowance_amount
+    ) * 100.0
+
+    hypothetical_percentage_used = max(
+        0.0,
+        min(
+            hypothetical_percentage_used,
+            100.0,
+        ),
+    )
+
+    # ========================================================
+    # Simulation Date
+    # ========================================================
+
+    simulation_date = datetime.now(
+        ZoneInfo("Asia/Manila")
+    ).date()
+
+
+    # ========================================================
+    # Validate Latest Transaction Date
+    # ========================================================
+
+    if latest_entry.date > simulation_date:
+        raise ValueError(
+            "The latest transaction date cannot be "
+            "later than the simulation date."
+        )
+
+
+    # ========================================================
+    # Days Since Previous Expense
+    # ========================================================
+
+    days_since_previous = (
+        simulation_date
+        - latest_entry.date
+    ).days
+
+    # ========================================================
+    # Days Until Next Allowance
+    #
+    # Reduce the latest known value according to how many
+    # calendar days have passed since the latest transaction.
+    # ========================================================
+
+    hypothetical_days_until_next_allowance = max(
+        0,
+        (
+            latest_entry.daysUntilNextAllowance
+            - days_since_previous
+        ),
+    )
+
+    # ========================================================
+    # Build Hypothetical Transaction
+    # ========================================================
+
+    hypothetical_entry = HistoryEntry(
+        date=simulation_date,
+
+        transactionAmount=(
+            planned_amount
+        ),
+
+        remainingAllowance=(
+            hypothetical_remaining
+        ),
+
+        essentialExpense=(
+            hypothetical_essential
+        ),
+
+        nonEssentialExpense=(
+            hypothetical_non_essential
+        ),
+
+        daysSincePreviousExpense=(
+            days_since_previous
+        ),
+
+        daysUntilNextAllowance=(
+            hypothetical_days_until_next_allowance
+        ),
+
+        allowanceAmount=(
+            allowance_amount
+        ),
+
+        percentageAllowanceUsed=(
+            hypothetical_percentage_used
+        ),
+    )
+
+    # ========================================================
+    # Build Temporary History
+    # ========================================================
+
+    simulated_history = list(
+        history
+    )
+
+    simulated_history.append(
+        hypothetical_entry
+    )
+
+    # ========================================================
+    # Keep Only 10 Rows
+    #
+    # If there are already 10 real transactions:
+    #
+    # Oldest real transaction is removed.
+    #
+    # Result:
+    # 9 real transactions
+    # +
+    # 1 hypothetical transaction
+    # =
+    # 10 GRU rows
+    # ========================================================
+
+    if (
+        len(simulated_history)
+        > MAX_SEQUENCE_LENGTH
+    ):
+        simulated_history = (
+            simulated_history[
+                -MAX_SEQUENCE_LENGTH:
+            ]
+        )
+
+    # ========================================================
+    # Build Standard Forecast Request
+    # ========================================================
+
+    simulated_request = ForecastRequest(
+        recentHistory=simulated_history
+    )
+
+    # ========================================================
+    # Simulation Debugging
+    # ========================================================
+
+    print(
+        "[SIMULATION] Planned expense: "
+        f"{planned_amount:.2f}",
+        flush=True,
+    )
+
+    print(
+        "[SIMULATION] Category: "
+        f"{request.category}",
+        flush=True,
+    )
+
+    print(
+        "[SIMULATION] Current remaining: "
+        f"{current_remaining:.2f}",
+        flush=True,
+    )
+
+    print(
+        "[SIMULATION] Projected remaining: "
+        f"{hypothetical_remaining:.2f}",
+        flush=True,
+    )
+
+    print(
+        "[SIMULATION] Allowance used after simulation: "
+        f"{hypothetical_percentage_used:.2f}%",
+        flush=True,
+    )
+
+    print(
+        "[SIMULATION] Days until next allowance: "
+        f"{hypothetical_days_until_next_allowance}",
+        flush=True,
+    )
+
+    print(
+        "[SIMULATION] GRU transaction count: "
+        f"{len(simulated_history)}",
+        flush=True,
+    )
+
+    # ========================================================
+    # SAME V8 TWO-STAGE GRU PIPELINE
+    # ========================================================
+
+    result = generate_forecast(
+        simulated_request
+    )
+
+    print(
+        "[SIMULATION] Result: "
+        f"risk={result.risk_level}, "
+        f"depletionExpected="
+        f"{result.depletion_expected_before_next_allowance}, "
+        f"days="
+        f"{result.predicted_days_until_depletion}",
+        flush=True,
+    )
+
+    print(
+        "[SIMULATION] ========================================",
+        flush=True,
+    )
+
+    return result

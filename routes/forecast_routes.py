@@ -14,10 +14,12 @@ from schemas.forecast_schemas import (
     ForecastHealthResponse,
     ForecastRequest,
     ForecastResponse,
+    SimulationRequest,
 )
 
 from services.forecast_service import (
     generate_forecast,
+    generate_simulation_forecast,
 )
 
 
@@ -95,8 +97,8 @@ def forecast_allowance(
     Generates Finora's real two-stage allowance forecast.
 
     Stage 1:
-    Predict whether the current allowance is
-    expected to deplete before the next allowance.
+    Predict whether the current allowance is expected
+    to deplete before the next allowance.
 
     Stage 2:
     If depletion is expected, predict the number
@@ -158,31 +160,33 @@ def forecast_allowance(
     status_code=status.HTTP_200_OK,
 )
 def simulate_allowance(
-    request: ForecastRequest,
+    request: SimulationRequest,
 ) -> ForecastResponse:
     """
-    Generates a hypothetical allowance forecast using
-    the SAME Finora V8 Two-Stage GRU models.
+    Generates Finora's What-If Simulation.
 
-    The Android application may include a hypothetical
-    transaction as the final entry in recentHistory.
+    The request contains:
+    - actual recent expense history
+    - planned expense amount
+    - planned expense category
+
+    The backend creates one hypothetical transaction and
+    evaluates it using the SAME Finora V8 Two-Stage GRU
+    forecasting pipeline used by the real forecast.
 
     IMPORTANT:
-    This endpoint performs inference only.
+    Simulation performs inference only.
 
-    It does not:
+    It does NOT:
     - save an expense
-    - modify an allowance
+    - modify the real allowance
     - save a forecast
     - modify Firestore
     - modify Room
-
-    Therefore, simulation results cannot overwrite the
-    user's actual financial forecast.
     """
 
     try:
-        return generate_forecast(
+        return generate_simulation_forecast(
             request
         )
 
