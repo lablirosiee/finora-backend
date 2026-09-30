@@ -1,0 +1,23 @@
+{
+    "version": "V9",
+    "featureColumns": [
+        "transactionAmount",
+        "remainingAllowance",
+        "essentialExpense",
+        "nonEssentialExpense",
+        "daysSincePreviousExpense",
+        "daysUntilNextAllowance",
+        "allowanceAmount",
+        "percentageAllowanceUsed"
+    ],
+    "minimumDistinctExpenseDays": 3,
+    "minimumTransactions": 5,
+    "maximumSequenceLength": 10,
+    "maskValue": -1.0,
+    "classifierThreshold": 0.42000000000000004,
+    "stage2Training": "ALL_VALID_ELIGIBLE_SEQUENCES",
+    "sequenceGrouping": [
+        "userId",
+        "cycleNumber"
+    ]
+}
