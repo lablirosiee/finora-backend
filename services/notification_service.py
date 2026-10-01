@@ -1,13 +1,22 @@
 import logging
-from datetime import datetime, timedelta, timezone
-from typing import Final, Optional
+from datetime import (
+    datetime,
+    timedelta,
+    timezone,
+)
+from typing import (
+    Final,
+    Optional,
+)
 
 from firebase_admin import firestore
 
 from services.fcm_service import (
     TYPE_STUDENT_ALLOWANCE_LOW,
-    TYPE_STUDENT_FINANCIAL_RISK,
     TYPE_STUDENT_UNUSUAL_SPENDING,
+    TYPE_STUDENT_FINANCIAL_RISK,
+    TYPE_STUDENT_BUDGET_EXCEEDED,
+    TYPE_STUDENT_FORECAST_UPDATE,
     send_push_to_user,
     validate_notification_type,
 )
@@ -26,24 +35,30 @@ logger = logging.getLogger(__name__)
 
 USERS_COLLECTION: Final[str] = "users"
 
-NOTIFICATIONS_COLLECTION: Final[str] = "notifications"
+NOTIFICATIONS_COLLECTION: Final[str] = (
+    "notifications"
+)
 
 
 # ============================================================
 # Provider Monitoring Notification Types
 #
-# These notification types are specifically sent to a Provider
-# about one linked Student.
+# These notifications belong to a Provider but concern one
+# linked Student.
 #
-# studentId is required for these types so Android can navigate
-# to the correct linked Student monitoring screen.
+# studentId is required so Android can navigate to the
+# correct linked Student monitoring screen.
 # ============================================================
 
-STUDENT_MONITORING_TYPES: Final[frozenset[str]] = frozenset(
+STUDENT_MONITORING_TYPES: Final[
+    frozenset[str]
+] = frozenset(
     {
         TYPE_STUDENT_ALLOWANCE_LOW,
         TYPE_STUDENT_UNUSUAL_SPENDING,
         TYPE_STUDENT_FINANCIAL_RISK,
+        TYPE_STUDENT_BUDGET_EXCEEDED,
+        TYPE_STUDENT_FORECAST_UPDATE,
     }
 )
 
@@ -59,9 +74,12 @@ def _normalize_text(
     Convert an optional value into a safe trimmed string.
     """
 
-    return str(
-        value or ""
-    ).strip()
+    return (
+        str(
+            value or ""
+        )
+        .strip()
+    )
 
 
 # ============================================================
@@ -75,21 +93,11 @@ def _normalize_student_id(
     """
     Normalize studentId.
 
-    Provider monitoring notification types require studentId.
+    Provider-monitoring notification types require a
+    studentId.
 
-    Examples:
-        STUDENT_ALLOWANCE_LOW
-        STUDENT_UNUSUAL_SPENDING
-        STUDENT_FINANCIAL_RISK
-
-    Own-finance notification types do not require studentId.
-
-    Examples:
-        ALLOWANCE_LOW
-        UNUSUAL_SPENDING
-        FINANCIAL_RISK
-        BUDGET_EXCEEDED
-        FORECAST_UPDATE
+    Own-finance, linking, and Smart Advice notifications
+    do not require studentId.
     """
 
     normalized_student_id = (
@@ -97,6 +105,7 @@ def _normalize_student_id(
             student_id
         )
     )
+
 
     if (
         notification_type
@@ -107,8 +116,10 @@ def _normalize_student_id(
 
             raise ValueError(
                 "studentId is required for provider-side "
-                f"monitoring notification type {notification_type}."
+                "monitoring notification type "
+                f"{notification_type}."
             )
+
 
     return normalized_student_id
 
@@ -125,23 +136,27 @@ def create_and_send_notification(
     student_id: str = "",
 ) -> str:
     """
-    Create a Firestore notification first, then attempt to send
-    its corresponding data-only FCM push.
+    Create a Firestore notification first and then attempt
+    to send the corresponding FCM push.
 
-    Firestore remains the source of truth.
+    Firestore is the source of truth.
 
-    If FCM delivery fails, the Firestore notification remains
-    available in the user's Notifications screen.
+    Therefore:
 
-    This function supports:
+        1. Notification is saved for the notification bell.
+        2. FCM push is attempted.
+        3. If FCM fails, the Firestore notification remains.
+
+    Supports:
+
         - Student own-finance notifications
         - Provider own-finance notifications
+        - Smart Advice
         - Linking notifications
         - Provider monitoring notifications
 
     Returns:
-        str:
-            Firestore notification document ID.
+        Firestore notification document ID.
     """
 
     # --------------------------------------------------------
@@ -176,10 +191,12 @@ def create_and_send_notification(
         _normalize_student_id(
             notification_type=
                 normalized_type,
+
             student_id=
                 student_id,
         )
     )
+
 
     # --------------------------------------------------------
     # Validate
@@ -191,11 +208,13 @@ def create_and_send_notification(
             "Target user ID is required."
         )
 
+
     if not normalized_title:
 
         raise ValueError(
             "Notification title is required."
         )
+
 
     if not normalized_message:
 
@@ -203,11 +222,13 @@ def create_and_send_notification(
             "Notification message is required."
         )
 
+
     # --------------------------------------------------------
     # Firestore Client
     # --------------------------------------------------------
 
     db = firestore.client()
+
 
     # --------------------------------------------------------
     # Verify Target User Exists
@@ -226,11 +247,13 @@ def create_and_send_notification(
         user_reference.get()
     )
 
+
     if not user_snapshot.exists:
 
         raise ValueError(
             "Target user does not exist."
         )
+
 
     # --------------------------------------------------------
     # Create Notification Document
@@ -246,6 +269,7 @@ def create_and_send_notification(
     notification_id = (
         notification_reference.id
     )
+
 
     notification_data = {
         "id":
@@ -277,6 +301,7 @@ def create_and_send_notification(
             False,
     }
 
+
     try:
 
         notification_reference.set(
@@ -285,13 +310,15 @@ def create_and_send_notification(
 
         logger.info(
             "Notification created. "
-            "notificationId=%s userId=%s type=%s studentId=%s",
+            "notificationId=%s userId=%s "
+            "type=%s studentId=%s",
             notification_id,
             normalized_user_id,
             normalized_type,
             normalized_student_id
             or "<none>",
         )
+
 
     except Exception as exc:
 
@@ -306,16 +333,17 @@ def create_and_send_notification(
             "Failed to create notification."
         ) from exc
 
+
     # --------------------------------------------------------
-    # Send FCM
+    # Send FCM Push
     #
     # IMPORTANT:
-    # The Firestore document is intentionally NOT deleted when
-    # FCM fails.
     #
-    # This allows the notification to remain visible inside
-    # Finora's Notifications screen even when push delivery is
-    # unavailable.
+    # Firestore is intentionally NOT rolled back when FCM
+    # delivery fails.
+    #
+    # This guarantees that the notification remains visible
+    # in Finora's notification bell/history.
     # --------------------------------------------------------
 
     try:
@@ -345,20 +373,22 @@ def create_and_send_notification(
             notification_id,
         )
 
+
     except ValueError as exc:
 
-        # Examples:
-        # - user has no registered FCM token
-        # - user's token is stale or unregistered
+        # Typical examples:
+        # - no registered FCM token
+        # - stale/unregistered token
         #
         # Firestore notification remains available.
 
         logger.warning(
-            "Notification %s was saved, but FCM delivery "
-            "was unavailable: %s",
+            "Notification %s was saved, but FCM "
+            "delivery was unavailable: %s",
             notification_id,
             exc,
         )
+
 
     except Exception:
 
@@ -367,10 +397,11 @@ def create_and_send_notification(
         # Firestore notification still remains available.
 
         logger.exception(
-            "Notification %s was saved, but FCM delivery "
-            "failed.",
+            "Notification %s was saved, but FCM "
+            "delivery failed.",
             notification_id,
         )
+
 
     return notification_id
 
@@ -387,77 +418,95 @@ def has_recent_notification(
     within_hours: int = 24,
 ) -> bool:
     """
-    Check whether an equivalent recent notification already exists.
+    Determine whether an equivalent recent notification
+    already exists.
 
     Deduplication:
-        Own-finance / linking:
+
+        Own-finance / Smart Advice / linking:
             userId + type
 
         Provider monitoring:
             userId + type + studentId
 
-    This implementation intentionally avoids a Firestore compound
-    query so a composite index is not required for notification
-    deduplication.
+    The query intentionally filters only by userId and then
+    performs remaining checks in Python so Finora does not
+    require a Firestore composite index for this operation.
     """
 
     # --------------------------------------------------------
     # Normalize
     # --------------------------------------------------------
 
-    normalized_user_id = _normalize_text(
-        user_id
+    normalized_user_id = (
+        _normalize_text(
+            user_id
+        )
     )
 
-    normalized_type = validate_notification_type(
-        notification_type
+    normalized_type = (
+        validate_notification_type(
+            notification_type
+        )
     )
 
-    normalized_student_id = _normalize_text(
-        student_id
+    normalized_student_id = (
+        _normalize_text(
+            student_id
+        )
     )
+
 
     # --------------------------------------------------------
     # Validate
     # --------------------------------------------------------
 
     if not normalized_user_id:
+
         raise ValueError(
             "Target user ID is required."
         )
 
+
     if within_hours <= 0:
+
         raise ValueError(
             "within_hours must be greater than zero."
         )
 
+
     if (
-        normalized_type in STUDENT_MONITORING_TYPES
+        normalized_type
+        in STUDENT_MONITORING_TYPES
         and not normalized_student_id
     ):
+
         raise ValueError(
             "studentId is required when checking a "
             "provider-side monitoring notification."
         )
+
 
     # --------------------------------------------------------
     # Calculate Cutoff
     # --------------------------------------------------------
 
     cutoff = (
-        datetime.now(timezone.utc)
-        - timedelta(hours=within_hours)
+        datetime.now(
+            timezone.utc
+        )
+        - timedelta(
+            hours=within_hours
+        )
     )
+
 
     # --------------------------------------------------------
     # Firestore Query
-    #
-    # Query only by userId.
-    # Remaining deduplication is performed in Python to avoid
-    # requiring a Firestore composite index.
     # --------------------------------------------------------
 
     db = firestore.client()
+
 
     try:
 
@@ -470,30 +519,52 @@ def has_recent_notification(
                 "==",
                 normalized_user_id,
             )
-            .limit(100)
+            .limit(
+                100
+            )
             .stream()
         )
 
+
         for document in documents:
 
-            data = document.to_dict() or {}
-
-            stored_type = _normalize_text(
-                data.get("type")
+            data = (
+                document.to_dict()
+                or {}
             )
 
-            if stored_type != normalized_type:
+
+            stored_type = (
+                _normalize_text(
+                    data.get(
+                        "type"
+                    )
+                )
+                .upper()
+            )
+
+
+            if (
+                stored_type
+                != normalized_type
+            ):
                 continue
 
+
             # ------------------------------------------------
-            # Compare studentId when one is part of the event
+            # Compare Student ID for Provider monitoring
             # ------------------------------------------------
 
             if normalized_student_id:
 
-                stored_student_id = _normalize_text(
-                    data.get("studentId")
+                stored_student_id = (
+                    _normalize_text(
+                        data.get(
+                            "studentId"
+                        )
+                    )
                 )
+
 
                 if (
                     stored_student_id
@@ -501,29 +572,40 @@ def has_recent_notification(
                 ):
                     continue
 
+
             # ------------------------------------------------
-            # Check creation timestamp
+            # Check Creation Timestamp
             # ------------------------------------------------
 
-            created_at = data.get(
-                "createdAt"
+            created_at = (
+                data.get(
+                    "createdAt"
+                )
             )
+
 
             if created_at is None:
                 continue
 
+
             try:
 
                 if created_at.tzinfo is None:
-                    created_at = created_at.replace(
-                        tzinfo=timezone.utc
+
+                    created_at = (
+                        created_at.replace(
+                            tzinfo=
+                                timezone.utc
+                        )
                     )
+
 
                 if created_at >= cutoff:
 
                     logger.info(
-                        "Recent duplicate notification found. "
-                        "userId=%s type=%s studentId=%s",
+                        "Recent duplicate notification "
+                        "found. userId=%s type=%s "
+                        "studentId=%s",
                         normalized_user_id,
                         normalized_type,
                         normalized_student_id
@@ -531,6 +613,7 @@ def has_recent_notification(
                     )
 
                     return True
+
 
             except (
                 AttributeError,
@@ -546,7 +629,9 @@ def has_recent_notification(
 
                 continue
 
+
         return False
+
 
     except Exception as exc:
 
@@ -577,16 +662,16 @@ def create_notification_if_not_recent(
     within_hours: int = 24,
 ) -> Optional[str]:
     """
-    Create and send a notification only if an equivalent one
-    does not already exist within the specified period.
+    Create a Firestore notification and send its FCM push
+    only when an equivalent recent notification does not
+    already exist.
 
     Returns:
         str:
-            New notification ID when a notification is created.
+            New notification ID.
 
         None:
-            Notification was skipped because an equivalent
-            notification already exists.
+            Equivalent notification already exists.
     """
 
     # --------------------------------------------------------
@@ -621,10 +706,12 @@ def create_notification_if_not_recent(
         _normalize_student_id(
             notification_type=
                 normalized_type,
+
             student_id=
                 student_id,
         )
     )
+
 
     # --------------------------------------------------------
     # Validate
@@ -636,11 +723,13 @@ def create_notification_if_not_recent(
             "Target user ID is required."
         )
 
+
     if not normalized_title:
 
         raise ValueError(
             "Notification title is required."
         )
+
 
     if not normalized_message:
 
@@ -648,13 +737,13 @@ def create_notification_if_not_recent(
             "Notification message is required."
         )
 
-    if (
-        within_hours <= 0
-    ):
+
+    if within_hours <= 0:
 
         raise ValueError(
             "within_hours must be greater than zero."
         )
+
 
     # --------------------------------------------------------
     # Check Existing Notification
@@ -680,6 +769,7 @@ def create_notification_if_not_recent(
         )
     )
 
+
     if already_exists:
 
         logger.info(
@@ -692,6 +782,7 @@ def create_notification_if_not_recent(
         )
 
         return None
+
 
     # --------------------------------------------------------
     # Create Firestore Notification + Send FCM

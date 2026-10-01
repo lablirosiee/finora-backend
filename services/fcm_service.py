@@ -2,7 +2,11 @@ import logging
 from typing import Final
 
 import firebase_admin
-from firebase_admin import credentials, firestore, messaging
+from firebase_admin import (
+    credentials,
+    firestore,
+    messaging,
+)
 
 from config import FIREBASE_SERVICE_ACCOUNT_PATH
 
@@ -38,13 +42,12 @@ FIELD_FCM_TOKEN_UPDATED_AT: Final[str] = (
 # Canonical Notification Types
 #
 # IMPORTANT:
-# These values must remain aligned with:
-#
-# - Android NotificationHelper.kt
-# - FinoraFirebaseMessagingService.kt
-# - NotificationRepository.kt
-# - notification_service.py
+# Keep these aligned with Android notification handling.
 # ============================================================
+
+# ------------------------------------------------------------
+# Linking Notifications
+# ------------------------------------------------------------
 
 TYPE_LINK_REQUEST: Final[str] = (
     "LINK_REQUEST"
@@ -68,9 +71,9 @@ TYPE_ACCOUNT_UNLINKED: Final[str] = (
 
 
 # ------------------------------------------------------------
-# OWN FINANCIAL NOTIFICATIONS
+# Own Financial Notifications
 #
-# These may belong to either a Student or Provider.
+# These can belong to either Student or Provider.
 # ------------------------------------------------------------
 
 TYPE_ALLOWANCE_LOW: Final[str] = (
@@ -95,9 +98,21 @@ TYPE_FORECAST_UPDATE: Final[str] = (
 
 
 # ------------------------------------------------------------
-# PROVIDER MONITORING NOTIFICATIONS
+# Smart Advice
 #
-# These concern a linked Student.
+# Smart Advice belongs to the user whose financial behavior
+# generated the advice.
+# ------------------------------------------------------------
+
+TYPE_SMART_ADVICE: Final[str] = (
+    "SMART_ADVICE"
+)
+
+
+# ------------------------------------------------------------
+# Provider Monitoring Notifications
+#
+# These concern one linked Student.
 # ------------------------------------------------------------
 
 TYPE_STUDENT_ALLOWANCE_LOW: Final[str] = (
@@ -112,13 +127,19 @@ TYPE_STUDENT_FINANCIAL_RISK: Final[str] = (
     "STUDENT_FINANCIAL_RISK"
 )
 
+TYPE_STUDENT_BUDGET_EXCEEDED: Final[str] = (
+    "STUDENT_BUDGET_EXCEEDED"
+)
+
+TYPE_STUDENT_FORECAST_UPDATE: Final[str] = (
+    "STUDENT_FORECAST_UPDATE"
+)
+
 
 # ------------------------------------------------------------
-# LOCAL REMINDER TYPES
+# Local Reminder Types
 #
 # Android currently creates these locally through WorkManager.
-# They remain valid canonical types so Android/backend type
-# handling stays consistent.
 # ------------------------------------------------------------
 
 TYPE_DAILY_REMINDER: Final[str] = (
@@ -130,26 +151,39 @@ TYPE_INACTIVITY_REMINDER: Final[str] = (
 )
 
 
+# ============================================================
+# Valid Notification Types
+# ============================================================
+
 VALID_NOTIFICATION_TYPES: Final[
     frozenset[str]
 ] = frozenset(
     {
+        # Linking
         TYPE_LINK_REQUEST,
         TYPE_LINK_APPROVED,
         TYPE_LINK_DECLINED,
         TYPE_LINK_EXPIRED,
         TYPE_ACCOUNT_UNLINKED,
 
+        # Own finances
         TYPE_ALLOWANCE_LOW,
         TYPE_UNUSUAL_SPENDING,
         TYPE_FINANCIAL_RISK,
         TYPE_BUDGET_EXCEEDED,
         TYPE_FORECAST_UPDATE,
 
+        # Smart Advice
+        TYPE_SMART_ADVICE,
+
+        # Linked Student -> Provider
         TYPE_STUDENT_ALLOWANCE_LOW,
         TYPE_STUDENT_UNUSUAL_SPENDING,
         TYPE_STUDENT_FINANCIAL_RISK,
+        TYPE_STUDENT_BUDGET_EXCEEDED,
+        TYPE_STUDENT_FORECAST_UPDATE,
 
+        # Local Android reminders
         TYPE_DAILY_REMINDER,
         TYPE_INACTIVITY_REMINDER,
     }
@@ -162,18 +196,11 @@ VALID_NOTIFICATION_TYPES: Final[
 
 def initialize_firebase() -> None:
     """
-    Initialize Firebase Admin SDK once.
-
-    Local development:
-        Uses the Firebase service-account path configured
-        by config.py.
-
-    Render:
-        FIREBASE_SERVICE_ACCOUNT_PATH should point to the
-        Render secret-file location.
+    Initialize Firebase Admin SDK exactly once.
     """
 
     try:
+
         firebase_admin.get_app()
 
         logger.debug(
@@ -183,8 +210,10 @@ def initialize_firebase() -> None:
         return
 
     except ValueError:
-        # No Firebase app exists yet.
+
+        # Firebase has not been initialized yet.
         pass
+
 
     if not SERVICE_ACCOUNT_PATH.exists():
 
@@ -192,6 +221,7 @@ def initialize_firebase() -> None:
             "Firebase service account file is missing at: "
             f"{SERVICE_ACCOUNT_PATH}"
         )
+
 
     try:
 
@@ -218,7 +248,7 @@ def initialize_firebase() -> None:
         ) from exc
 
 
-# Initialize Firebase once when module loads.
+# Initialize Firebase once when this module loads.
 initialize_firebase()
 
 
@@ -264,11 +294,7 @@ def validate_notification_type(
     notification_type: str,
 ) -> str:
     """
-    Normalize and validate a notification type.
-
-    Raises:
-        ValueError:
-            If the type is empty or unsupported.
+    Normalize and validate a Finora notification type.
     """
 
     normalized_type = (
@@ -283,6 +309,7 @@ def validate_notification_type(
             "Notification type is required."
         )
 
+
     if (
         normalized_type
         not in VALID_NOTIFICATION_TYPES
@@ -292,6 +319,7 @@ def validate_notification_type(
             "Unsupported notification type: "
             f"{normalized_type}"
         )
+
 
     return normalized_type
 
@@ -304,17 +332,9 @@ def get_user_fcm_token(
     user_id: str,
 ) -> str:
     """
-    Retrieve the currently registered FCM token for a Finora
-    user.
+    Retrieve the currently registered FCM token for a user.
 
     Finora currently stores one active FCM token per user.
-    Therefore the most recently registered compatible device
-    receives remote push notifications.
-
-    Raises:
-        ValueError:
-            If the user does not exist or does not currently
-            have an FCM token.
     """
 
     normalized_user_id = (
@@ -327,6 +347,7 @@ def get_user_fcm_token(
         raise ValueError(
             "Target user ID is required."
         )
+
 
     db = get_firestore_client()
 
@@ -349,23 +370,28 @@ def get_user_fcm_token(
             "Target user does not exist."
         )
 
+
     user_data = (
         user_document.to_dict()
         or {}
     )
 
-    fcm_token = str(
-        user_data.get(
-            FIELD_FCM_TOKEN
+    fcm_token = (
+        str(
+            user_data.get(
+                FIELD_FCM_TOKEN
+            )
+            or ""
         )
-        or ""
-    ).strip()
+        .strip()
+    )
 
     if not fcm_token:
 
         raise ValueError(
             "Target user has no FCM token."
         )
+
 
     return fcm_token
 
@@ -379,14 +405,8 @@ def clear_invalid_fcm_token(
     invalid_token: str,
 ) -> None:
     """
-    Remove a stale/invalid FCM token from Firestore.
-
-    IMPORTANT:
-    The fields are removed only when the currently stored token
-    still matches the invalid token.
-
-    This protects a newer token that may have been registered by
-    another device while the failed FCM request was in progress.
+    Remove an invalid/stale token only if the token currently
+    stored in Firestore still matches the failed token.
     """
 
     normalized_user_id = (
@@ -399,11 +419,13 @@ def clear_invalid_fcm_token(
         .strip()
     )
 
+
     if (
         not normalized_user_id
         or not normalized_token
     ):
         return
+
 
     try:
 
@@ -417,6 +439,7 @@ def clear_invalid_fcm_token(
                 normalized_user_id
             )
         )
+
 
         @firestore.transactional
         def clear_token_if_unchanged(
@@ -432,23 +455,29 @@ def clear_invalid_fcm_token(
             if not snapshot.exists:
                 return False
 
+
             user_data = (
                 snapshot.to_dict()
                 or {}
             )
 
-            current_token = str(
-                user_data.get(
-                    FIELD_FCM_TOKEN
+            current_token = (
+                str(
+                    user_data.get(
+                        FIELD_FCM_TOKEN
+                    )
+                    or ""
                 )
-                or ""
-            ).strip()
+                .strip()
+            )
+
 
             if (
                 current_token
                 != normalized_token
             ):
                 return False
+
 
             transaction.update(
                 user_reference,
@@ -463,6 +492,7 @@ def clear_invalid_fcm_token(
 
             return True
 
+
         transaction = (
             db.transaction()
         )
@@ -472,6 +502,7 @@ def clear_invalid_fcm_token(
                 transaction
             )
         )
+
 
         if removed:
 
@@ -484,14 +515,17 @@ def clear_invalid_fcm_token(
 
             logger.info(
                 "Invalid FCM token was not removed because "
-                "the stored token had already changed. userId=%s",
+                "the stored token had already changed. "
+                "userId=%s",
                 normalized_user_id,
             )
 
+
     except Exception:
 
-        # Token cleanup must never hide/replace the original
-        # FCM delivery failure.
+        # Token cleanup should never hide the original
+        # FCM delivery error.
+
         logger.exception(
             "Failed to clear invalid FCM token for user %s.",
             normalized_user_id,
@@ -511,19 +545,14 @@ def send_push_to_user(
     student_id: str = "",
 ) -> str:
     """
-    Send a data-only FCM notification to one Finora user.
+    Send one data-only FCM push to a Finora user.
 
-    This function ONLY sends the remote push.
-
-    Firestore notification creation is handled separately by
+    Firestore notification creation is handled by
     notification_service.py.
 
-    student_id:
-        Empty for the user's own financial notifications.
-
-        Populated for Provider monitoring notifications such as
-        STUDENT_ALLOWANCE_LOW so Android knows which linked
-        Student should be opened.
+    student_id is populated for Provider monitoring
+    notifications so Android knows which Student the
+    notification concerns.
     """
 
     # --------------------------------------------------------
@@ -555,6 +584,7 @@ def send_push_to_user(
         .strip()
     )
 
+
     # --------------------------------------------------------
     # Validate
     # --------------------------------------------------------
@@ -565,11 +595,13 @@ def send_push_to_user(
             "Target user ID is required."
         )
 
+
     normalized_type = (
         validate_notification_type(
             notification_type
         )
     )
+
 
     if not normalized_title:
 
@@ -577,14 +609,16 @@ def send_push_to_user(
             "Notification title is required."
         )
 
+
     if not normalized_message:
 
         raise ValueError(
             "Notification message is required."
         )
 
+
     # --------------------------------------------------------
-    # Get FCM Token
+    # Retrieve FCM Token
     # --------------------------------------------------------
 
     fcm_token = (
@@ -592,6 +626,7 @@ def send_push_to_user(
             normalized_user_id
         )
     )
+
 
     # --------------------------------------------------------
     # Build FCM Data Payload
@@ -607,7 +642,7 @@ def send_push_to_user(
         "body":
             normalized_message,
 
-        # Android currently accepts both body and message.
+        # Android accepts both body and message.
         "message":
             normalized_message,
 
@@ -617,6 +652,7 @@ def send_push_to_user(
         "studentId":
             normalized_student_id,
     }
+
 
     # --------------------------------------------------------
     # Build Data-Only Message
@@ -631,6 +667,7 @@ def send_push_to_user(
             priority="high",
         ),
     )
+
 
     # --------------------------------------------------------
     # Send
@@ -653,6 +690,7 @@ def send_push_to_user(
 
         return response
 
+
     except messaging.UnregisteredError as exc:
 
         logger.warning(
@@ -670,6 +708,7 @@ def send_push_to_user(
             "The stored token has been removed and the app "
             "must register a new token."
         ) from exc
+
 
     except Exception as exc:
 

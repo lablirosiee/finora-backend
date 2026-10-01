@@ -64,8 +64,24 @@ EVENT_BUDGET_EXCEEDED = "BUDGET_EXCEEDED"
 
 EVENT_FORECAST_UPDATE = "FORECAST_UPDATE"
 
+EVENT_SMART_ADVICE = "SMART_ADVICE"
+
 
 SUPPORTED_OWN_FINANCE_EVENTS = {
+    EVENT_ALLOWANCE_LOW,
+    EVENT_UNUSUAL_SPENDING,
+    EVENT_FINANCIAL_RISK,
+    EVENT_BUDGET_EXCEEDED,
+    EVENT_FORECAST_UPDATE,
+    EVENT_SMART_ADVICE,
+}
+
+
+# ============================================================
+# Events Forwarded from Student to Linked Provider
+# ============================================================
+
+PROVIDER_FORWARDABLE_EVENTS = {
     EVENT_ALLOWANCE_LOW,
     EVENT_UNUSUAL_SPENDING,
     EVENT_FINANCIAL_RISK,
@@ -265,7 +281,7 @@ def get_linked_provider_ids(
     Return the Provider IDs currently linked to a Student.
 
     Finora stores active Provider-Student relationships in
-    the `linked_accounts` collection.
+    the linked_accounts collection.
 
     A link removed through the secure unlink endpoint is
     deleted from that collection, so only existing linked
@@ -350,7 +366,10 @@ def notify_linked_providers(
     The Student never supplies a Provider UID.
 
     Provider recipients are determined entirely by the
-    backend using the verified `linked_accounts` collection.
+    backend using the verified linked_accounts collection.
+
+    Smart Advice is intentionally NOT forwarded because it
+    belongs only to the owner of the financial data.
 
     Returns the number of newly created Provider
     notifications.
@@ -370,7 +389,6 @@ def notify_linked_providers(
         )
 
         return 0
-
 
     student_name = (
         get_user_name(
@@ -606,6 +624,7 @@ def trigger_notification_event(
       the backend from Firestore.
     - A Provider receives a Student financial notification
       only when a linked_accounts document exists.
+    - Smart Advice remains private to the account owner.
     """
 
     # --------------------------------------------------------
@@ -802,6 +821,40 @@ def trigger_notification_event(
 
 
     # ========================================================
+    # SMART ADVICE
+    # ========================================================
+
+    elif (
+        event_type
+        == EVENT_SMART_ADVICE
+    ):
+
+        notification_id = (
+            create_notification_if_not_recent(
+                user_id=
+                    current_user.uid,
+
+                notification_type=
+                    EVENT_SMART_ADVICE,
+
+                title=
+                    "Smart Spending Advice",
+
+                message=(
+                    "A new spending insight is available. "
+                    "Check Finora for advice on managing "
+                    "your allowance."
+                ),
+
+                # Prevent repeated advice notifications
+                # from becoming spammy.
+                within_hours=
+                    12,
+            )
+        )
+
+
+    # ========================================================
     # DEFENSIVE FALLBACK
     # ========================================================
 
@@ -843,14 +896,22 @@ def trigger_notification_event(
         # Student -> Linked Provider(s)
         # ----------------------------------------------------
         #
-        # Only Student financial events are forwarded to
-        # linked Providers.
+        # Financial monitoring events from a Student are
+        # forwarded to linked Providers.
         #
-        # A Provider's own financial events stay with that
-        # Provider and are not forwarded.
+        # SMART_ADVICE is intentionally excluded because
+        # Smart Advice belongs only to the owner of the
+        # financial behavior.
+        #
+        # Provider own-finance events also remain with the
+        # Provider.
         # ----------------------------------------------------
 
-        if user_role == "student":
+        if (
+            user_role == "student"
+            and event_type
+            in PROVIDER_FORWARDABLE_EVENTS
+        ):
 
             provider_notifications_created = (
                 notify_linked_providers(
@@ -869,6 +930,19 @@ def trigger_notification_event(
                 current_user.uid,
                 event_type,
                 provider_notifications_created,
+            )
+
+
+        elif (
+            user_role == "student"
+            and event_type
+            == EVENT_SMART_ADVICE
+        ):
+
+            logger.info(
+                "Student Smart Advice remains private "
+                "to the Student. uid=%s",
+                current_user.uid,
             )
 
 
