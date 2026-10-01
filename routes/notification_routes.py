@@ -7,6 +7,8 @@ from fastapi import (
     status,
 )
 
+from firebase_admin import firestore
+
 from schemas.notification_schemas import (
     NotificationEventRequest,
     NotificationEventResponse,
@@ -40,11 +42,16 @@ router = APIRouter(
 
 
 # ============================================================
-# Supported Own-Finance Events
-#
-# IMPORTANT:
-# These events apply to BOTH Student and Provider because both
-# roles can independently manage their own finances.
+# Firestore Collections
+# ============================================================
+
+LINKED_ACCOUNTS_COLLECTION = "linked_accounts"
+
+USERS_COLLECTION = "users"
+
+
+# ============================================================
+# Own-Finance Events
 # ============================================================
 
 EVENT_ALLOWANCE_LOW = "ALLOWANCE_LOW"
@@ -68,6 +75,31 @@ SUPPORTED_OWN_FINANCE_EVENTS = {
 
 
 # ============================================================
+# Linked-Student Provider Events
+# ============================================================
+
+EVENT_STUDENT_ALLOWANCE_LOW = (
+    "STUDENT_ALLOWANCE_LOW"
+)
+
+EVENT_STUDENT_UNUSUAL_SPENDING = (
+    "STUDENT_UNUSUAL_SPENDING"
+)
+
+EVENT_STUDENT_FINANCIAL_RISK = (
+    "STUDENT_FINANCIAL_RISK"
+)
+
+EVENT_STUDENT_BUDGET_EXCEEDED = (
+    "STUDENT_BUDGET_EXCEEDED"
+)
+
+EVENT_STUDENT_FORECAST_UPDATE = (
+    "STUDENT_FORECAST_UPDATE"
+)
+
+
+# ============================================================
 # Event Normalization
 # ============================================================
 
@@ -75,8 +107,8 @@ def normalize_event_type(
     event_type: str,
 ) -> str:
     """
-    Normalize an Android notification event into Finora's
-    canonical uppercase format.
+    Normalize an Android notification event into
+    Finora's canonical uppercase format.
     """
 
     return (
@@ -86,6 +118,465 @@ def normalize_event_type(
         .strip()
         .upper()
     )
+
+
+# ============================================================
+# User Name
+# ============================================================
+
+def get_user_name(
+    user_id: str,
+    fallback: str = "The student",
+) -> str:
+    """
+    Retrieve a Finora user's display name.
+
+    This is used only for linked-Provider notification text.
+    """
+
+    if not user_id:
+        return fallback
+
+    try:
+
+        db = firestore.client()
+
+        snapshot = (
+            db.collection(
+                USERS_COLLECTION
+            )
+            .document(
+                user_id
+            )
+            .get()
+        )
+
+        if not snapshot.exists:
+            return fallback
+
+        data = (
+            snapshot.to_dict()
+            or {}
+        )
+
+        name = (
+            str(
+                data.get("name")
+                or ""
+            )
+            .strip()
+        )
+
+        return (
+            name
+            if name
+            else fallback
+        )
+
+    except Exception:
+
+        logger.exception(
+            "Unable to retrieve user name. uid=%s",
+            user_id,
+        )
+
+        return fallback
+
+
+# ============================================================
+# User Role
+# ============================================================
+
+def get_user_role(
+    user_id: str,
+) -> str:
+    """
+    Retrieve the authenticated Finora user's role from
+    Firestore.
+
+    Expected values:
+        - student
+        - provider
+
+    The value is normalized to lowercase.
+    """
+
+    if not user_id:
+        return ""
+
+    try:
+
+        db = firestore.client()
+
+        snapshot = (
+            db.collection(
+                USERS_COLLECTION
+            )
+            .document(
+                user_id
+            )
+            .get()
+        )
+
+        if not snapshot.exists:
+
+            logger.warning(
+                "User document does not exist while "
+                "resolving role. uid=%s",
+                user_id,
+            )
+
+            return ""
+
+        data = (
+            snapshot.to_dict()
+            or {}
+        )
+
+        role = (
+            str(
+                data.get("role")
+                or ""
+            )
+            .strip()
+            .lower()
+        )
+
+        return role
+
+    except Exception:
+
+        logger.exception(
+            "Unable to retrieve user role. uid=%s",
+            user_id,
+        )
+
+        return ""
+
+
+# ============================================================
+# Get Linked Providers
+# ============================================================
+
+def get_linked_provider_ids(
+    student_id: str,
+) -> list[str]:
+    """
+    Return the Provider IDs currently linked to a Student.
+
+    Finora stores active Provider-Student relationships in
+    the `linked_accounts` collection.
+
+    A link removed through the secure unlink endpoint is
+    deleted from that collection, so only existing linked
+    account documents are used here.
+    """
+
+    if not student_id:
+        return []
+
+    db = firestore.client()
+
+    try:
+
+        snapshots = (
+            db.collection(
+                LINKED_ACCOUNTS_COLLECTION
+            )
+            .where(
+                "studentId",
+                "==",
+                student_id,
+            )
+            .stream()
+        )
+
+        provider_ids: list[str] = []
+
+        for snapshot in snapshots:
+
+            data = (
+                snapshot.to_dict()
+                or {}
+            )
+
+            provider_id = (
+                str(
+                    data.get(
+                        "providerId"
+                    )
+                    or ""
+                )
+                .strip()
+            )
+
+            if (
+                provider_id
+                and provider_id
+                not in provider_ids
+            ):
+
+                provider_ids.append(
+                    provider_id
+                )
+
+        return provider_ids
+
+    except Exception:
+
+        logger.exception(
+            "Failed to retrieve linked Providers "
+            "for student=%s.",
+            student_id,
+        )
+
+        return []
+
+
+# ============================================================
+# Provider Fan-Out
+# ============================================================
+
+def notify_linked_providers(
+    student_id: str,
+    own_event_type: str,
+) -> int:
+    """
+    Send the appropriate financial monitoring notification
+    to every Provider currently linked to the Student.
+
+    IMPORTANT:
+
+    The Student never supplies a Provider UID.
+
+    Provider recipients are determined entirely by the
+    backend using the verified `linked_accounts` collection.
+
+    Returns the number of newly created Provider
+    notifications.
+    """
+
+    provider_ids = (
+        get_linked_provider_ids(
+            student_id
+        )
+    )
+
+    if not provider_ids:
+
+        logger.info(
+            "No linked Providers found for student=%s.",
+            student_id,
+        )
+
+        return 0
+
+
+    student_name = (
+        get_user_name(
+            student_id,
+            "The student",
+        )
+    )
+
+
+    # --------------------------------------------------------
+    # Provider Notification Content
+    # --------------------------------------------------------
+
+    if (
+        own_event_type
+        == EVENT_ALLOWANCE_LOW
+    ):
+
+        provider_event_type = (
+            EVENT_STUDENT_ALLOWANCE_LOW
+        )
+
+        title = (
+            "Student Allowance Running Low"
+        )
+
+        message = (
+            f"{student_name}'s remaining allowance "
+            "is running low."
+        )
+
+        within_hours = 24
+
+
+    elif (
+        own_event_type
+        == EVENT_UNUSUAL_SPENDING
+    ):
+
+        provider_event_type = (
+            EVENT_STUDENT_UNUSUAL_SPENDING
+        )
+
+        title = (
+            "Unusual Student Spending"
+        )
+
+        message = (
+            f"{student_name}'s recent spending "
+            "is higher than usual."
+        )
+
+        within_hours = 24
+
+
+    elif (
+        own_event_type
+        == EVENT_FINANCIAL_RISK
+    ):
+
+        provider_event_type = (
+            EVENT_STUDENT_FINANCIAL_RISK
+        )
+
+        title = (
+            "Student Financial Risk"
+        )
+
+        message = (
+            f"{student_name}'s current spending "
+            "pattern may put the allowance at risk."
+        )
+
+        within_hours = 24
+
+
+    elif (
+        own_event_type
+        == EVENT_BUDGET_EXCEEDED
+    ):
+
+        provider_event_type = (
+            EVENT_STUDENT_BUDGET_EXCEEDED
+        )
+
+        title = (
+            "Student Budget Exceeded"
+        )
+
+        message = (
+            f"{student_name} has exceeded the "
+            "current allowance budget."
+        )
+
+        within_hours = 24
+
+
+    elif (
+        own_event_type
+        == EVENT_FORECAST_UPDATE
+    ):
+
+        provider_event_type = (
+            EVENT_STUDENT_FORECAST_UPDATE
+        )
+
+        title = (
+            "Student Forecast Updated"
+        )
+
+        message = (
+            f"{student_name}'s allowance forecast "
+            "has been updated."
+        )
+
+        within_hours = 12
+
+
+    else:
+
+        logger.warning(
+            "Provider fan-out skipped for unsupported "
+            "event. student=%s event=%s",
+            student_id,
+            own_event_type,
+        )
+
+        return 0
+
+
+    # --------------------------------------------------------
+    # Send to Each Linked Provider
+    # --------------------------------------------------------
+
+    created_count = 0
+
+    for provider_id in provider_ids:
+
+        try:
+
+            notification_id = (
+                create_notification_if_not_recent(
+                    user_id=
+                        provider_id,
+
+                    notification_type=
+                        provider_event_type,
+
+                    title=
+                        title,
+
+                    message=
+                        message,
+
+                    student_id=
+                        student_id,
+
+                    within_hours=
+                        within_hours,
+                )
+            )
+
+            if (
+                notification_id
+                is not None
+            ):
+
+                created_count += 1
+
+                logger.info(
+                    "Linked-Provider notification created. "
+                    "provider=%s student=%s type=%s "
+                    "notificationId=%s",
+                    provider_id,
+                    student_id,
+                    provider_event_type,
+                    notification_id,
+                )
+
+            else:
+
+                logger.info(
+                    "Linked-Provider notification skipped "
+                    "because a recent equivalent exists. "
+                    "provider=%s student=%s type=%s",
+                    provider_id,
+                    student_id,
+                    provider_event_type,
+                )
+
+        except Exception:
+
+            # One Provider notification failure must not
+            # prevent the Student's own notification or
+            # notifications to other linked Providers.
+
+            logger.exception(
+                "Failed to create linked-Provider "
+                "notification. provider=%s student=%s "
+                "type=%s",
+                provider_id,
+                student_id,
+                provider_event_type,
+            )
+
+    return created_count
 
 
 # ============================================================
@@ -104,20 +595,17 @@ def trigger_notification_event(
     ),
 ) -> NotificationEventResponse:
     """
-    Handle an authenticated Finora user's own financial
+    Handle an authenticated Finora user's financial
     notification event.
 
-    Both Student and Provider may trigger these events for their
-    own account.
-
     SECURITY:
-    The recipient is always current_user.uid.
 
-    Android cannot choose another user's UID through this route.
-
-    Linking and linked-Student monitoring notifications should
-    be created by the backend code that performs and validates
-    the actual linking operation.
+    - The own-account recipient is always current_user.uid.
+    - Android cannot choose another user's UID.
+    - Linked Provider recipients are resolved entirely by
+      the backend from Firestore.
+    - A Provider receives a Student financial notification
+      only when a linked_accounts document exists.
     """
 
     # --------------------------------------------------------
@@ -129,6 +617,7 @@ def trigger_notification_event(
             request.eventType
         )
     )
+
 
     # --------------------------------------------------------
     # Validate Event
@@ -147,11 +636,15 @@ def trigger_notification_event(
         )
 
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
+            status_code=
+                status.HTTP_400_BAD_REQUEST,
+
             detail=(
-                "Unsupported own-finance notification event."
+                "Unsupported own-finance "
+                "notification event."
             ),
         )
+
 
     # ========================================================
     # LOW ALLOWANCE
@@ -183,6 +676,7 @@ def trigger_notification_event(
             )
         )
 
+
     # ========================================================
     # UNUSUAL SPENDING
     # ========================================================
@@ -212,6 +706,7 @@ def trigger_notification_event(
                     24,
             )
         )
+
 
     # ========================================================
     # FINANCIAL RISK
@@ -243,6 +738,7 @@ def trigger_notification_event(
             )
         )
 
+
     # ========================================================
     # BUDGET EXCEEDED
     # ========================================================
@@ -272,6 +768,7 @@ def trigger_notification_event(
                     24,
             )
         )
+
 
     # ========================================================
     # FORECAST UPDATED
@@ -303,6 +800,7 @@ def trigger_notification_event(
             )
         )
 
+
     # ========================================================
     # DEFENSIVE FALLBACK
     # ========================================================
@@ -310,18 +808,123 @@ def trigger_notification_event(
     else:
 
         raise HTTPException(
-            status_code=status.HTTP_400_BAD_REQUEST,
-            detail="Unsupported notification event.",
+            status_code=
+                status.HTTP_400_BAD_REQUEST,
+
+            detail=(
+                "Unsupported notification event."
+            ),
         )
 
+
     # ========================================================
-    # DUPLICATE SKIPPED
+    # LINKED PROVIDER FAN-OUT
     # ========================================================
 
-    if (
-        notification_id
-        is None
-    ):
+    provider_notifications_created = 0
+
+    try:
+
+        user_role = (
+            get_user_role(
+                current_user.uid
+            )
+        )
+
+        logger.info(
+            "Notification owner role resolved. "
+            "uid=%s role=%s",
+            current_user.uid,
+            user_role or "UNKNOWN",
+        )
+
+
+        # ----------------------------------------------------
+        # Student -> Linked Provider(s)
+        # ----------------------------------------------------
+        #
+        # Only Student financial events are forwarded to
+        # linked Providers.
+        #
+        # A Provider's own financial events stay with that
+        # Provider and are not forwarded.
+        # ----------------------------------------------------
+
+        if user_role == "student":
+
+            provider_notifications_created = (
+                notify_linked_providers(
+                    student_id=
+                        current_user.uid,
+
+                    own_event_type=
+                        event_type,
+                )
+            )
+
+            logger.info(
+                "Student Provider fan-out completed. "
+                "student=%s event=%s "
+                "providerNotificationsCreated=%d",
+                current_user.uid,
+                event_type,
+                provider_notifications_created,
+            )
+
+
+        elif user_role == "provider":
+
+            logger.info(
+                "Provider own-finance event. "
+                "Linked-Provider fan-out not required. "
+                "uid=%s event=%s",
+                current_user.uid,
+                event_type,
+            )
+
+
+        else:
+
+            logger.warning(
+                "Unknown or missing Finora user role. "
+                "Own notification was processed, but "
+                "Provider fan-out was skipped. "
+                "uid=%s role=%s event=%s",
+                current_user.uid,
+                user_role or "UNKNOWN",
+                event_type,
+            )
+
+
+    except Exception:
+
+        # A Provider fan-out failure must never cause the
+        # authenticated user's own notification request to
+        # fail.
+
+        logger.exception(
+            "Linked-Provider fan-out processing failed. "
+            "uid=%s event=%s",
+            current_user.uid,
+            event_type,
+        )
+
+
+    # ========================================================
+    # RESPONSE
+    # ========================================================
+
+    if notification_id is None:
+
+        logger.info(
+            "Own notification skipped because a recent "
+            "equivalent notification already exists. "
+            "uid=%s event=%s "
+            "providerNotificationsCreated=%d",
+            current_user.uid,
+            event_type,
+            provider_notifications_created,
+        )
 
         return NotificationEventResponse(
             success=True,
@@ -333,22 +936,20 @@ def trigger_notification_event(
             ),
         )
 
-    # ========================================================
-    # CREATED
-    # ========================================================
 
     logger.info(
-        "Own-finance notification created. "
-        "uid=%s type=%s notificationId=%s",
+        "Own notification event completed successfully. "
+        "uid=%s event=%s notificationId=%s "
+        "providerNotificationsCreated=%d",
         current_user.uid,
         event_type,
         notification_id,
+        provider_notifications_created,
     )
 
     return NotificationEventResponse(
         success=True,
-        notificationId=
-            notification_id,
+        notificationId=notification_id,
         skipped=False,
         message=(
             "Notification created successfully."
