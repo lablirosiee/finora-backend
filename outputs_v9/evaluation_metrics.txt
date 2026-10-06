@@ -1,0 +1,40 @@
+FINORA V9 TWO-STAGE GRU
+============================================================
+
+DATASET
+Rows: 1950
+Base profiles: 30
+Behavioral users: 120
+
+ELIGIBILITY
+- Minimum distinct expense days: 3
+- Minimum transactions: 5
+- Maximum recent transactions: 10
+- Sequence boundary: userId + cycleNumber
+
+STAGE 1 — CLASSIFIER
+Threshold: 0.4200
+Accuracy: 0.9608
+Precision: 1.0000
+Recall: 0.9231
+F1-score: 0.9600
+ROC-AUC: 0.9896
+Missed depletion cases: 6
+Correctly flagged depletion cases: 72
+False depletion warnings: 0
+Correctly identified survivors: 75
+
+STAGE 2 — REGRESSOR
+Training population: ALL valid eligible V9 sequences
+MAE: 1.8080 days
+RMSE: 2.5260 days
+
+FEATURE ORDER
+1. transactionAmount
+2. remainingAllowance
+3. essentialExpense
+4. nonEssentialExpense
+5. daysSincePreviousExpense
+6. daysUntilNextAllowance
+7. allowanceAmount
+8. percentageAllowanceUsed
