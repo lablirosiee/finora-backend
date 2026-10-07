@@ -862,7 +862,7 @@ def has_recent_notification(
 
     notification_type: str,
 
-    \*,
+    *,
 
     student_id: Optional[str] = None,
 
