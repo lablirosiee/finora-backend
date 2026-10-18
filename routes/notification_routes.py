@@ -270,6 +270,16 @@ EVENT_SMART_ADVICE = "SMART_ADVICE"
 
 EVENT_ALLOWANCE_CYCLE_ENDED = "ALLOWANCE_CYCLE_ENDED"
 
+# Provider -> Student allowance events
+EVENT_PROVIDER_ALLOWANCE_SET = "PROVIDER_ALLOWANCE_SET"
+EVENT_PROVIDER_ALLOWANCE_ADDED = "PROVIDER_ALLOWANCE_ADDED"
+
+PROVIDER_ALLOWANCE_EVENTS = {
+    EVENT_PROVIDER_ALLOWANCE_SET,
+    EVENT_PROVIDER_ALLOWANCE_ADDED,
+}
+
+
 
 
 
@@ -4429,17 +4439,8 @@ def trigger_notification_event(
 
 
     if (
-
-
-
-        event_type
-
-
-
-        not in SUPPORTED_OWN_FINANCE_EVENTS
-
-
-
+        event_type not in SUPPORTED_OWN_FINANCE_EVENTS
+        and event_type not in PROVIDER_ALLOWANCE_EVENTS
     ):
 
 
@@ -4448,7 +4449,7 @@ def trigger_notification_event(
 
 
 
-            "Unsupported own-finance notification event. "
+            "Unsupported notification event. "
 
 
 
@@ -4510,6 +4511,146 @@ def trigger_notification_event(
 
 
 
+
+
+    # ========================================================
+    # PROVIDER -> STUDENT ALLOWANCE
+    # ========================================================
+    #
+    # Android supplies only eventType + studentId.
+    # Backend verifies Provider role, Student role, active link,
+    # and the actual Provider-set allowance before notifying.
+    # ========================================================
+
+    if event_type in PROVIDER_ALLOWANCE_EVENTS:
+
+        student_id = str(
+            request.studentId or ""
+        ).strip()
+
+        if not student_id:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Student ID is required for Provider allowance notifications.",
+            )
+
+        if get_user_role(current_user.uid) != "provider":
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="Only a Provider can trigger this allowance notification.",
+            )
+
+        if get_user_role(student_id) != "student":
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="The target account is not a Student.",
+            )
+
+        db = firestore.client()
+
+        link_id = f"{current_user.uid}_{student_id}"
+
+        link_snapshot = (
+            db.collection(LINKED_ACCOUNTS_COLLECTION)
+            .document(link_id)
+            .get()
+        )
+
+        if not link_snapshot.exists:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You are not linked to this Student.",
+            )
+
+        allowance_snapshot = (
+            db.collection(ALLOWANCES_COLLECTION)
+            .document(student_id)
+            .get()
+        )
+
+        if not allowance_snapshot.exists:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="The Student allowance does not exist.",
+            )
+
+        allowance_data = allowance_snapshot.to_dict() or {}
+
+        if (
+            str(allowance_data.get("setBy") or "").strip().lower() != "provider"
+            or str(allowance_data.get("setByUserId") or "").strip()
+            != current_user.uid
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=(
+                    "The current Student allowance was not assigned "
+                    "by the authenticated Provider."
+                ),
+            )
+
+        try:
+            allowance_amount = float(
+                allowance_data.get("allowanceAmount") or 0.0
+            )
+        except (TypeError, ValueError):
+            allowance_amount = 0.0
+
+        allowance_cycle = str(
+            allowance_data.get("allowanceCycle") or ""
+        ).strip()
+
+        provider_name = get_user_name(
+            current_user.uid,
+            fallback="Your Provider",
+        )
+
+        if event_type == EVENT_PROVIDER_ALLOWANCE_SET:
+            title = "New Allowance Assigned"
+
+            if allowance_amount > 0.0 and allowance_cycle:
+                message = (
+                    f"{provider_name} assigned ₱{allowance_amount:,.2f} "
+                    f"as your {allowance_cycle} allowance. "
+                    "Open Finora to configure your Essential and "
+                    "Non-Essential allocation."
+                )
+            else:
+                message = (
+                    f"{provider_name} assigned a new allowance. "
+                    "Open Finora to configure your Essential and "
+                    "Non-Essential allocation."
+                )
+
+        else:
+            title = "Additional Allowance Added"
+
+            if allowance_amount > 0.0:
+                message = (
+                    f"{provider_name} added funds to your current allowance. "
+                    f"Your new total is ₱{allowance_amount:,.2f}. "
+                    "Open Finora to allocate only the newly added amount."
+                )
+            else:
+                message = (
+                    f"{provider_name} added funds to your current allowance. "
+                    "Open Finora to allocate only the newly added amount."
+                )
+
+        notification_id = create_and_send_notification(
+            user_id=student_id,
+            notification_type=event_type,
+            title=title,
+            message=message,
+            student_id=student_id,
+        )
+
+        return NotificationEventResponse(
+            success=True,
+            notificationId=notification_id,
+            skipped=False,
+            message="Student allowance notification created.",
+        )
 
 
     # ========================================================
