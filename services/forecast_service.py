@@ -441,22 +441,38 @@ def build_input_sequence(
 # ============================================================
 
 def calculate_risk_level(
-    depletion_expected: bool,
     predicted_days: int | None,
+    days_until_next_allowance: int,
 ) -> str:
     """
-    Risk refers to the CURRENT allowance cycle.
+    Determine CURRENT-CYCLE allowance risk.
 
-    If Stage 1 predicts that the balance will survive until
-    the next allowance, current-cycle risk is LOW even though
-    Stage 2 can still provide a longer depletion horizon.
+    Risk respects the allowance-cycle boundary:
+    - If predicted depletion happens AFTER the next allowance,
+      current-cycle risk is LOW because new allowance arrives first.
+    - If depletion is predicted ON or BEFORE the next allowance,
+      use Finora's urgency thresholds:
+        0-3 days  -> CRITICAL
+        4-7 days  -> HIGH
+        8-14 days -> MODERATE
+        15+ days  -> LOW
+
+    Stage 1 remains part of the two-stage GRU for the depletion-before-
+    next-allowance classification and for consistency diagnostics. The
+    displayed risk itself is derived from the Stage 2 depletion horizon
+    together with the actual allowance-cycle boundary.
     """
-
-    if not depletion_expected:
-        return "LOW"
 
     if predicted_days is None:
         return "UNKNOWN"
+
+    safe_days_until_next_allowance = max(
+        0,
+        int(days_until_next_allowance),
+    )
+
+    if predicted_days > safe_days_until_next_allowance:
+        return "LOW"
 
     if predicted_days <= 3:
         return "CRITICAL"
@@ -826,8 +842,8 @@ def generate_forecast(
     # ========================================================
 
     risk_level = calculate_risk_level(
-        depletion_expected=depletion_expected,
         predicted_days=predicted_days,
+        days_until_next_allowance=days_until_next_allowance,
     )
 
     # ========================================================
@@ -867,6 +883,14 @@ def generate_forecast(
     print(
         "[FORECAST] Risk level: "
         f"{risk_level}",
+        flush=True,
+    )
+
+    print(
+        "[FORECAST] Cycle-aware risk check: "
+        f"predictedDays={predicted_days}, "
+        f"daysUntilNextAllowance={days_until_next_allowance}, "
+        f"stage1DepletionExpected={depletion_expected}",
         flush=True,
     )
 
