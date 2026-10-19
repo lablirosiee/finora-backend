@@ -884,6 +884,59 @@ def get_user_role(
 
 # ============================================================
 
+# Active Link Validation
+
+# ============================================================
+
+
+def _is_active_link_data(data: dict) -> bool:
+    """Return True only for an approved, non-expired link."""
+
+    status_value = str(
+        data.get("status") or ""
+    ).strip().lower()
+
+    if status_value != "approved":
+        return False
+
+    expires_at = data.get("expiresAt")
+
+    # If an approved legacy link has no expiry, keep it active.
+    if expires_at is None:
+        return True
+
+    now_utc = datetime.now(timezone.utc)
+
+    try:
+        if isinstance(expires_at, datetime):
+            expiry = expires_at
+            if expiry.tzinfo is None:
+                expiry = expiry.replace(tzinfo=timezone.utc)
+            else:
+                expiry = expiry.astimezone(timezone.utc)
+            return expiry > now_utc
+
+        numeric_expiry = float(expires_at)
+
+        # Firestore/Android may store epoch milliseconds.
+        if numeric_expiry > 10_000_000_000:
+            numeric_expiry /= 1000.0
+
+        return datetime.fromtimestamp(
+            numeric_expiry,
+            tz=timezone.utc,
+        ) > now_utc
+
+    except (TypeError, ValueError, OSError, OverflowError):
+        logger.warning(
+            "Link has an invalid expiresAt value and will be treated as inactive."
+        )
+        return False
+
+
+
+# ============================================================
+
 
 
 # Get Linked Providers
@@ -899,218 +952,53 @@ def get_user_role(
 
 
 def get_linked_provider_ids(
-
-
-
     student_id: str,
-
-
-
 ) -> list[str]:
-
-
-
     """
-
-
-
-    Return the Provider IDs currently linked to a Student.
-
-
-
-
-
-
-
-    Finora stores active Provider-Student relationships in
-
-
-
-    the linked_accounts collection. When a link is removed,
-
-
-
-    its active linked-account document is removed.
-
-
-
+    Return Provider IDs for approved, non-expired links only.
     """
-
-
-
-
-
-
 
     normalized_student_id = str(student_id or "").strip()
 
-
-
-
-
-
-
     if not normalized_student_id:
-
-
-
         return []
-
-
-
-
-
-
 
     db = firestore.client()
 
-
-
-
-
-
-
     try:
-
-
-
         snapshots = (
-
-
-
             db.collection(LINKED_ACCOUNTS_COLLECTION)
-
-
-
             .where(
-
-
-
                 "studentId",
-
-
-
                 "==",
-
-
-
                 normalized_student_id,
-
-
-
             )
-
-
-
             .stream()
-
-
-
         )
-
-
-
-
-
-
 
         provider_ids: list[str] = []
 
-
-
-
-
-
-
         for snapshot in snapshots:
-
-
-
             data = snapshot.to_dict() or {}
 
-
-
-
-
-
+            if not _is_active_link_data(data):
+                continue
 
             provider_id = str(
-
-
-
                 data.get("providerId") or ""
-
-
-
             ).strip()
 
-
-
-
-
-
-
-            if (
-
-
-
-                provider_id
-
-
-
-                and provider_id not in provider_ids
-
-
-
-            ):
-
-
-
+            if provider_id and provider_id not in provider_ids:
                 provider_ids.append(provider_id)
-
-
-
-
-
-
 
         return provider_ids
 
-
-
-
-
-
-
     except Exception:
-
-
-
         logger.exception(
-
-
-
-            "Failed to retrieve linked Providers for student=%s.",
-
-
-
+            "Failed to retrieve active linked Providers for student=%s.",
             normalized_student_id,
-
-
-
         )
-
-
-
         return []
-
-
-
-
-
-
-
-
 
 
 
@@ -2738,7 +2626,9 @@ def process_category_budget_notifications(
 
 
 
-
+        # Soft-deleted expenses must never contribute to budget totals.
+        if expense_data.get("isDeleted") is True:
+            continue
 
 
 
@@ -4560,6 +4450,17 @@ def trigger_notification_event(
             raise HTTPException(
                 status_code=status.HTTP_403_FORBIDDEN,
                 detail="You are not linked to this Student.",
+            )
+
+        link_data = link_snapshot.to_dict() or {}
+
+        if not _is_active_link_data(link_data):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail=(
+                    "The Student-Provider link is not approved "
+                    "or has already expired."
+                ),
             )
 
         allowance_snapshot = (

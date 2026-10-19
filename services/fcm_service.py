@@ -384,6 +384,14 @@ TYPE_FORECAST_UPDATE: Final[str] = (
 
 )
 
+
+
+TYPE_ALLOWANCE_CYCLE_ENDED: Final[str] = (
+
+    "ALLOWANCE_CYCLE_ENDED"
+
+)
+
 # ------------------------------------------------------------
 # Provider -> Student Allowance Notifications
 # ------------------------------------------------------------
@@ -555,6 +563,14 @@ TYPE_STUDENT_FORECAST_UPDATE: Final[str] = (
 
 
 
+TYPE_STUDENT_ALLOWANCE_CYCLE_ENDED: Final[str] = (
+
+    "STUDENT_ALLOWANCE_CYCLE_ENDED"
+
+)
+
+
+
 
 
 
@@ -704,6 +720,7 @@ VALID_NOTIFICATION_TYPES: Final[
 
 
         TYPE_FORECAST_UPDATE,
+        TYPE_ALLOWANCE_CYCLE_ENDED,
         TYPE_PROVIDER_ALLOWANCE_SET,
         TYPE_PROVIDER_ALLOWANCE_ADDED,
 
@@ -747,6 +764,7 @@ VALID_NOTIFICATION_TYPES: Final[
 
 
         TYPE_STUDENT_FORECAST_UPDATE,
+        TYPE_STUDENT_ALLOWANCE_CYCLE_ENDED,
 
 
 
