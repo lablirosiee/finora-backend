@@ -1,3 +1,4 @@
+
 from pydantic import (
     BaseModel,
     Field,
@@ -20,6 +21,9 @@ class NotificationEventRequest(BaseModel):
         - message
         - canonical notification type
 
+    expenseId identifies the saved expense associated with
+    an expense-triggered notification.
+
     Android must not choose an arbitrary notification recipient.
     """
 
@@ -32,9 +36,14 @@ class NotificationEventRequest(BaseModel):
         default="",
     )
 
+    expenseId: str = Field(
+        default="",
+    )
+
     @field_validator(
         "eventType",
         "studentId",
+        "expenseId",
         mode="before",
     )
     @classmethod
@@ -42,12 +51,7 @@ class NotificationEventRequest(BaseModel):
         cls,
         value,
     ):
-
-        if isinstance(
-            value,
-            str,
-        ):
-
+        if isinstance(value, str):
             return value.strip()
 
         return value

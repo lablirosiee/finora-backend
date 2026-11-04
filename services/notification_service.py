@@ -42,6 +42,9 @@ from typing import (
 
 
 
+from google.api_core.exceptions import Conflict
+import hashlib
+
 from firebase_admin import firestore
 
 
@@ -55,6 +58,8 @@ from services.fcm_service import (
 
 
     TYPE_STUDENT_ALLOWANCE_LOW,
+    TYPE_STUDENT_ALLOWANCE_DEPLETED,
+    TYPE_STUDENT_ALLOWANCE_EXCEEDED,
 
 
 
@@ -241,6 +246,8 @@ STUDENT_MONITORING_TYPES: Final[
 
 
         TYPE_STUDENT_ALLOWANCE_LOW,
+        TYPE_STUDENT_ALLOWANCE_DEPLETED,
+        TYPE_STUDENT_ALLOWANCE_EXCEEDED,
 
 
 
@@ -3291,3 +3298,104 @@ def create_notification_if_not_recent(
 
 
     )
+
+
+
+# ============================================================
+# EXPENSE-SCOPED NOTIFICATION (PER SAVED EXPENSE)
+# ============================================================
+
+
+def create_expense_notification_once(
+    *,
+    user_id: str,
+    notification_type: str,
+    title: str,
+    message: str,
+    expense_id: str,
+    student_id: str = "",
+) -> Optional[str]:
+    """
+    Persist one notification per recipient, type, and expense ID.
+
+    Distinct expense IDs can trigger alerts even within the same 24 hours.
+    Replaying the same expense event does not duplicate its notification.
+    The caller (the authenticated notification route) must verify the
+    expense belongs to the requester and is eligible for the event.
+
+    Firestore notification history is retained if FCM delivery fails.
+    """
+    normalized_user_id = _normalize_text(user_id)
+    normalized_expense_id = _normalize_text(expense_id)
+    normalized_type = validate_notification_type(notification_type)
+    normalized_student_id = _normalize_student_id(
+        notification_type=normalized_type,
+        student_id=student_id,
+    )
+    normalized_title = _normalize_text(title)
+    normalized_message = _normalize_text(message)
+
+    if not normalized_user_id or not normalized_expense_id:
+        raise ValueError("Recipient userId and expenseId are required.")
+    if not normalized_title or not normalized_message:
+        raise ValueError("Notification title and message are required.")
+
+    db = firestore.client()
+    user_snapshot = db.collection(USERS_COLLECTION).document(
+        normalized_user_id
+    ).get()
+    if not user_snapshot.exists:
+        raise ValueError("Target user does not exist.")
+
+    # A stable, bounded Firestore document ID; the type and recipient
+    # are part of the key, so each linked Provider has its own alert.
+    unique_key = hashlib.sha256(
+        f"{normalized_user_id}|{normalized_type}|{normalized_expense_id}"
+        .encode("utf-8")
+    ).hexdigest()
+    notification_id = f"expense_{unique_key}"
+    notification_ref = db.collection(NOTIFICATIONS_COLLECTION).document(
+        notification_id
+    )
+
+    try:
+        # Atomic create: an existing document causes Conflict.
+        # Concurrent retries therefore cannot both create an alert.
+        notification_ref.create({
+            "id": notification_id,
+            "userId": normalized_user_id,
+            "type": normalized_type,
+            "title": normalized_title,
+            "message": normalized_message,
+            "studentId": normalized_student_id or None,
+            "expenseId": normalized_expense_id,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+            "read": False,
+        })
+    except Conflict:
+        logger.info(
+            "Duplicate expense notification skipped: user=%s type=%s expense=%s",
+            normalized_user_id, normalized_type, normalized_expense_id,
+        )
+        return None
+
+    user_settings = user_snapshot.to_dict() or {}
+    if user_settings.get(
+        FIELD_PUSH_NOTIFICATIONS_ENABLED, True
+    ) is not False:
+        try:
+            send_push_to_user(
+                user_id=normalized_user_id,
+                notification_type=normalized_type,
+                title=normalized_title,
+                message=normalized_message,
+                notification_id=notification_id,
+                student_id=normalized_student_id,
+            )
+        except Exception:
+            logger.exception(
+                "Expense notification %s saved, but FCM push failed.",
+                notification_id,
+            )
+
+    return notification_id

@@ -87,6 +87,7 @@ from services.notification_service import (
 
 
     create_notification_if_not_recent,
+    create_expense_notification_once,
 
 
 
@@ -245,6 +246,8 @@ ALLOWANCE_CYCLE_ALERT_STATES_COLLECTION = "allowance_cycle_alert_states"
 
 
 EVENT_ALLOWANCE_LOW = "ALLOWANCE_LOW"
+EVENT_ALLOWANCE_DEPLETED = "ALLOWANCE_DEPLETED"
+EVENT_ALLOWANCE_EXCEEDED = "ALLOWANCE_EXCEEDED"
 
 
 
@@ -291,6 +294,8 @@ SUPPORTED_OWN_FINANCE_EVENTS = {
 
 
     EVENT_ALLOWANCE_LOW,
+    EVENT_ALLOWANCE_DEPLETED,
+    EVENT_ALLOWANCE_EXCEEDED,
 
 
 
@@ -365,6 +370,7 @@ PROVIDER_FORWARDABLE_EVENTS = {
 
 
     EVENT_ALLOWANCE_LOW,
+    EVENT_ALLOWANCE_DEPLETED,
 
 
 
@@ -411,6 +417,8 @@ PROVIDER_FORWARDABLE_EVENTS = {
 
 
 EVENT_STUDENT_ALLOWANCE_LOW = "STUDENT_ALLOWANCE_LOW"
+EVENT_STUDENT_ALLOWANCE_DEPLETED = "STUDENT_ALLOWANCE_DEPLETED"
+EVENT_STUDENT_ALLOWANCE_EXCEEDED = "STUDENT_ALLOWANCE_EXCEEDED"
 
 
 
@@ -3800,6 +3808,12 @@ def notify_linked_providers(
 
 
 
+    elif own_event_type == EVENT_ALLOWANCE_DEPLETED:
+        provider_event_type = EVENT_STUDENT_ALLOWANCE_DEPLETED
+        title = "Student Allowance Depleted"
+        message = f"{student_name}'s allowance has been fully depleted."
+        within_hours = 24
+
     elif own_event_type == EVENT_UNUSUAL_SPENDING:
 
 
@@ -4208,6 +4222,129 @@ def notify_linked_providers(
 
 
 
+# ============================================================
+# Saved Expense Verification and Per-Expense Alerts
+# ============================================================
+
+def _ms_timestamp(value) -> int:
+    """Accept Firestore Timestamp/datetime or epoch milliseconds."""
+    if isinstance(value, datetime):
+        if value.tzinfo is None:
+            value = value.replace(tzinfo=timezone.utc)
+        return int(value.timestamp() * 1000)
+    try:
+        number = float(value)
+    except (ValueError, TypeError, OverflowError):
+        return 0
+    return int(number * 1000 if 0 < number < 10_000_000_000 else number)
+
+
+def _evaluate_saved_expense_event(uid: str, expense_id: str, event_type: str):
+    """Verify expense ownership and derive the condition from Firestore.
+
+    The ID alone is not proof: every event is verified server-side. The
+    existing weekly unusual-spending rule (1.5x historical weekly average)
+    is evaluated against current saved expense data.
+    """
+    db = firestore.client()
+    expense_doc = db.collection(EXPENSES_COLLECTION).document(expense_id).get()
+    if not expense_doc.exists:
+        raise HTTPException(status_code=409, detail="Expense has not synced to Firestore.")
+    expense = expense_doc.to_dict() or {}
+    if expense.get("userId") != uid or expense.get("isDeleted") is True:
+        raise HTTPException(status_code=403, detail="Expense is not accessible to this account.")
+    expense_ms = _ms_timestamp(expense.get("expenseDate"))
+    if expense_ms <= 0 or _safe_float(expense.get("amount")) <= 0:
+        raise HTTPException(status_code=409, detail="Saved expense data is invalid.")
+
+    allowance_doc = db.collection(ALLOWANCES_COLLECTION).document(uid).get()
+    if not allowance_doc.exists:
+        return False, 0.0
+    allowance = allowance_doc.to_dict() or {}
+    cycle_start = _ms_timestamp(allowance.get("cycleStartDate"))
+    cycle_end = _ms_timestamp(allowance.get("cycleEndDate"))
+    allowance_amount = _safe_float(allowance.get("allowanceAmount"))
+
+    expenses = []
+    for doc in db.collection(EXPENSES_COLLECTION).where("userId", "==", uid).stream():
+        d = doc.to_dict() or {}
+        if d.get("isDeleted") is True: continue
+        amount = _safe_float(d.get("amount"))
+        date_ms = _ms_timestamp(d.get("expenseDate"))
+        if amount > 0 and date_ms > 0:
+            expenses.append((date_ms, amount))
+
+    if event_type == EVENT_ALLOWANCE_EXCEEDED:
+        if allowance_amount <= 0 or not (cycle_start <= expense_ms <= cycle_end):
+            return False, 0.0
+        total_spent = sum(amount for date, amount in expenses
+                          if cycle_start <= date <= cycle_end)
+        return total_spent > allowance_amount + 0.005, max(0.0, total_spent-allowance_amount)
+
+    # Existing Android condition: current week > 1.5 * average of
+    # historical weekly totals. Use the expense's own week rather than
+    # blindly allowing a replay from an old week.
+    from datetime import timedelta
+    from zoneinfo import ZoneInfo
+    tz = ZoneInfo("Asia/Manila")
+    expense_date = datetime.fromtimestamp(expense_ms / 1000, tz=tz)
+    monday = (expense_date - timedelta(days=expense_date.weekday())).replace(
+        hour=0, minute=0, second=0, microsecond=0)
+    week_start = int(monday.timestamp() * 1000)
+    next_week = int((monday + timedelta(days=7)).timestamp() * 1000)
+    this_week = sum(amount for date, amount in expenses if week_start <= date < next_week)
+    historical = {}
+    for date, amount in expenses:
+        if date >= week_start: continue
+        d = datetime.fromtimestamp(date / 1000, tz=tz)
+        week = (d - timedelta(days=d.weekday())).date().isoformat()
+        historical[week] = historical.get(week, 0.0) + amount
+    if not historical: return False, 0.0
+    average_weekly = sum(historical.values()) / len(historical)
+    return (average_weekly > 0 and this_week > 1.5 * average_weekly), this_week
+
+
+def _process_saved_expense_notification(uid: str, expense_id: str, event_type: str):
+    eligible, measure = _evaluate_saved_expense_event(uid, expense_id, event_type)
+    if not eligible:
+        return NotificationEventResponse(
+            success=True, notificationId=None, skipped=True,
+            message="Saved expense does not meet this alert condition.")
+    if event_type == EVENT_ALLOWANCE_EXCEEDED:
+        own_title = "Allowance Exceeded"
+        own_msg = f"Your recorded spending exceeds your allowance by ₱{measure:,.2f}."
+        provider_type = EVENT_STUDENT_ALLOWANCE_EXCEEDED
+        provider_title = "Student Allowance Exceeded"
+    else:
+        own_title = "Unusual Spending Detected"
+        own_msg = "Your spending this week is higher than your usual weekly spending."
+        provider_type = EVENT_STUDENT_UNUSUAL_SPENDING
+        provider_title = "Unusual Student Spending"
+
+    own_id = create_expense_notification_once(
+        user_id=uid, notification_type=event_type,
+        title=own_title, message=own_msg, expense_id=expense_id)
+    provider_created = 0
+    if get_user_role(uid) == "student":
+        name = get_user_name(uid, "The student")
+        provider_msg = (f"{name}'s recorded expenses exceed their allowance "
+                        f"by ₱{measure:,.2f}." if event_type == EVENT_ALLOWANCE_EXCEEDED
+                        else f"{name}'s spending this week is higher than usual.")
+        for provider_id in get_linked_provider_ids(uid):
+            try:
+                result = create_expense_notification_once(
+                    user_id=provider_id, notification_type=provider_type,
+                    title=provider_title, message=provider_msg,
+                    expense_id=expense_id, student_id=uid)
+                if result: provider_created += 1
+            except Exception:
+                logger.exception("Per-expense Provider alert failed. provider=%s expense=%s",
+                                 provider_id, expense_id)
+    return NotificationEventResponse(
+        success=True, notificationId=own_id, skipped=own_id is None,
+        message=f"Per-expense alert processed; linked Providers notified: {provider_created}.")
+
+
 # Production Own-Finance Notification Endpoint
 
 
@@ -4404,6 +4541,28 @@ def trigger_notification_event(
 
 
     # ========================================================
+    # Per-expense alerts are keyed by expense ID, NOT a 24-hour cooldown.
+    # Reject requests without a saved ID; never generate false alerts from refreshes.
+    if event_type in {EVENT_ALLOWANCE_EXCEEDED, EVENT_UNUSUAL_SPENDING}:
+        expense_id = str(request.expenseId or "").strip()
+        if not expense_id:
+            raise HTTPException(status_code=400, detail="expenseId is required for expense alerts.")
+        return _process_saved_expense_notification(
+            current_user.uid, expense_id, event_type)
+
+    if event_type == EVENT_ALLOWANCE_DEPLETED:
+        allowance_doc = firestore.client().collection(
+            ALLOWANCES_COLLECTION).document(current_user.uid).get()
+        if not allowance_doc.exists:
+            return NotificationEventResponse(success=True, notificationId=None,
+                skipped=True, message="No allowance is currently set.")
+        allowance = allowance_doc.to_dict() or {}
+        # Depletion and exceeding are distinct: remaining can be clamped to zero.
+        if _safe_float(allowance.get("allowanceAmount")) <= 0 or \
+           _safe_float(allowance.get("remainingAllowance"), float("inf")) > 0:
+            return NotificationEventResponse(success=True, notificationId=None,
+                skipped=True, message="Allowance is not depleted.")
+
     # PROVIDER -> STUDENT ALLOWANCE
     # ========================================================
     #
@@ -5096,6 +5255,15 @@ def trigger_notification_event(
 
 
 
+
+    elif event_type == EVENT_ALLOWANCE_DEPLETED:
+        notification_id = create_notification_if_not_recent(
+            user_id=current_user.uid,
+            notification_type=EVENT_ALLOWANCE_DEPLETED,
+            title="Allowance Depleted",
+            message="Your remaining allowance has reached ₱0.00.",
+            within_hours=24,
+        )
 
     elif event_type == EVENT_UNUSUAL_SPENDING:
 
