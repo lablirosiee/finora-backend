@@ -999,6 +999,10 @@ def get_linked_provider_ids(
             if provider_id and provider_id not in provider_ids:
                 provider_ids.append(provider_id)
 
+        logger.warning(
+            "FINORA_NOTIF_TRACE linked-providers student=%s count=%d",
+            normalized_student_id, len(provider_ids),
+        )
         return provider_ids
 
     except Exception:
@@ -3710,7 +3714,10 @@ def notify_linked_providers(
 
     if not provider_ids:
 
-
+        logger.warning(
+            "FINORA_NOTIF_TRACE provider-fanout-skipped student=%s event=%s reason=no-eligible-providers",
+            student_id, own_event_type,
+        )
 
         logger.info(
 
@@ -4206,6 +4213,10 @@ def notify_linked_providers(
 
 
 
+    logger.warning(
+        "FINORA_NOTIF_TRACE provider-fanout-complete student=%s event=%s providersCreated=%d",
+        student_id, own_event_type, created_count,
+    )
     return created_count
 
 
@@ -4307,6 +4318,10 @@ def _evaluate_saved_expense_event(uid: str, expense_id: str, event_type: str):
 def _process_saved_expense_notification(uid: str, expense_id: str, event_type: str):
     eligible, measure = _evaluate_saved_expense_event(uid, expense_id, event_type)
     if not eligible:
+        logger.warning(
+            "FINORA_NOTIF_TRACE expense-skipped uid=%s event=%s expense=%s",
+            uid, event_type, expense_id,
+        )
         return NotificationEventResponse(
             success=True, notificationId=None, skipped=True,
             message="Saved expense does not meet this alert condition.")
@@ -4340,6 +4355,10 @@ def _process_saved_expense_notification(uid: str, expense_id: str, event_type: s
             except Exception:
                 logger.exception("Per-expense Provider alert failed. provider=%s expense=%s",
                                  provider_id, expense_id)
+    logger.warning(
+        "FINORA_NOTIF_TRACE expense-processed uid=%s event=%s ownCreated=%s providersCreated=%d",
+        uid, event_type, own_id is not None, provider_created,
+    )
     return NotificationEventResponse(
         success=True, notificationId=own_id, skipped=own_id is None,
         message=f"Per-expense alert processed; linked Providers notified: {provider_created}.")
@@ -4459,6 +4478,11 @@ def trigger_notification_event(
 
     )
 
+    logger.warning(
+        "FINORA_NOTIF_TRACE received uid=%s event=%s expenseIdProvided=%s",
+        current_user.uid, event_type, bool(str(request.expenseId or "").strip()),
+    )
+
 
 
 
@@ -4554,12 +4578,26 @@ def trigger_notification_event(
         allowance_doc = firestore.client().collection(
             ALLOWANCES_COLLECTION).document(current_user.uid).get()
         if not allowance_doc.exists:
+            logger.warning(
+                "FINORA_NOTIF_TRACE depleted-skipped uid=%s reason=no-allowance",
+                current_user.uid,
+            )
             return NotificationEventResponse(success=True, notificationId=None,
                 skipped=True, message="No allowance is currently set.")
         allowance = allowance_doc.to_dict() or {}
+        logger.warning(
+            "FINORA_NOTIF_TRACE depleted-check uid=%s amount=%s remaining=%s cycleStart=%s cycleEnd=%s",
+            current_user.uid, allowance.get("allowanceAmount"),
+            allowance.get("remainingAllowance"), allowance.get("cycleStartDate"),
+            allowance.get("cycleEndDate"),
+        )
         # Depletion and exceeding are distinct: remaining can be clamped to zero.
         if _safe_float(allowance.get("allowanceAmount")) <= 0 or \
            _safe_float(allowance.get("remainingAllowance"), float("inf")) > 0:
+            logger.warning(
+                "FINORA_NOTIF_TRACE depleted-skipped uid=%s reason=balance-positive-or-invalid",
+                current_user.uid,
+            )
             return NotificationEventResponse(success=True, notificationId=None,
                 skipped=True, message="Allowance is not depleted.")
 
@@ -5875,7 +5913,10 @@ def trigger_notification_event(
 
     if notification_id is None:
 
-
+        logger.warning(
+            "FINORA_NOTIF_TRACE owner-duplicate uid=%s event=%s providersCreated=%d",
+            current_user.uid, event_type, provider_notifications_created,
+        )
 
         logger.info(
 
