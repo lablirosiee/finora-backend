@@ -1,4 +1,7 @@
 import logging
+import hashlib
+
+from google.api_core.exceptions import Conflict
 
 
 
@@ -39,6 +42,8 @@ from firebase_admin import firestore
 
 
 from google.cloud.firestore_v1 import transactional
+
+from services.fcm_service import send_push_to_user, validate_notification_type
 
 
 
@@ -218,6 +223,9 @@ BUDGET_ALERT_STATES_COLLECTION = "budget_alert_states"
 # Backend-only idempotency state for allowance-cycle-ended alerts.
 
 ALLOWANCE_CYCLE_ALERT_STATES_COLLECTION = "allowance_cycle_alert_states"
+
+# Tracks each restore-and-deplete episode within one allowance cycle.
+ALLOWANCE_DEPLETION_STATES_COLLECTION = "allowance_depletion_alert_states"
 
 
 
@@ -891,6 +899,170 @@ def get_user_role(
 
 
 # ============================================================
+# Allowance depletion episodes (independent of 24-hour cooldown)
+# ============================================================
+
+
+def _depletion_state_reference(user_id: str, cycle_start: int):
+    return firestore.client().collection(
+        ALLOWANCE_DEPLETION_STATES_COLLECTION
+    ).document(f"{user_id}_{cycle_start}")
+
+
+def _reconcile_depletion_episode(
+    user_id: str,
+    *,
+    is_depleted: bool,
+    cycle_start: int,
+) -> int:
+    """Atomically transition between funded/depleted states.
+
+    Deletion or top-up resets the state to funded, while each subsequent
+    zero-balance crossing increments the episode. Repeated zero-balance
+    requests reuse the same episode; recipient documents are idempotent.
+    """
+    ref = _depletion_state_reference(user_id, cycle_start)
+    transaction = firestore.client().transaction()
+
+    @transactional
+    def update(transaction) -> int:
+        snapshot = ref.get(transaction=transaction)
+        previous = snapshot.to_dict() if snapshot.exists else {}
+        previous = previous or {}
+        episode = int(previous.get("episode") or 0)
+        was_depleted = bool(previous.get("isDepleted", False))
+        if is_depleted and not was_depleted:
+            episode += 1
+        if is_depleted != was_depleted or not snapshot.exists:
+            transaction.set(ref, {
+                "userId": user_id,
+                "cycleStartDate": cycle_start,
+                "episode": episode,
+                "isDepleted": is_depleted,
+                "updatedAt": firestore.SERVER_TIMESTAMP,
+            }, merge=True)
+        return episode
+
+    episode = update(transaction)
+    logger.warning(
+        "FINORA_NOTIF_TRACE depletion-state uid=%s cycle=%s "
+        "depleted=%s episode=%d",
+        user_id, cycle_start, is_depleted, episode,
+    )
+    return episode
+
+
+def _create_depletion_notification_once(
+    *,
+    recipient_id: str,
+    notification_type: str,
+    title: str,
+    message: str,
+    student_id: str,
+    cycle_start: int,
+    episode: int,
+) -> str | None:
+    """Persist one alert per recipient/cycle/depletion episode.
+
+    A deterministic Firestore document prevents duplicate bells on retries.
+    Push failures never erase the saved bell notification.
+    """
+    notification_type = validate_notification_type(notification_type)
+    db = firestore.client()
+    user_snapshot = db.collection(USERS_COLLECTION).document(recipient_id).get()
+    if not user_snapshot.exists:
+        raise ValueError("Notification recipient does not exist.")
+    identity = hashlib.sha256(
+        f"{recipient_id}|{notification_type}|{cycle_start}|{episode}"
+        .encode("utf-8")
+    ).hexdigest()
+    notification_id = f"depletion_{identity}"
+    ref = db.collection("notifications").document(notification_id)
+    try:
+        ref.create({
+            "id": notification_id,
+            "userId": recipient_id,
+            "type": notification_type,
+            "title": title,
+            "message": message,
+            "studentId": student_id or None,
+            "createdAt": firestore.SERVER_TIMESTAMP,
+            "read": False,
+        })
+    except Conflict:
+        logger.warning(
+            "FINORA_NOTIF_TRACE depletion-duplicate user=%s type=%s "
+            "episode=%d", recipient_id, notification_type, episode,
+        )
+        return None
+
+    if (user_snapshot.to_dict() or {}).get("pushNotificationsEnabled", True) is not False:
+        try:
+            send_push_to_user(
+                user_id=recipient_id,
+                notification_type=notification_type,
+                title=title,
+                message=message,
+                notification_id=notification_id,
+                student_id=student_id,
+            )
+        except Exception:
+            logger.exception(
+                "Depletion bell saved but FCM failed. notification=%s",
+                notification_id,
+            )
+    return notification_id
+
+
+def _send_depletion_episode(user_id: str, cycle_start: int, episode: int):
+    """Create owner and linked-provider alerts, retrying missing recipients."""
+    owner_id = _create_depletion_notification_once(
+        recipient_id=user_id,
+        notification_type=EVENT_ALLOWANCE_DEPLETED,
+        title="Allowance Depleted",
+        message="Your remaining allowance has reached ₱0.00.",
+        student_id="",
+        cycle_start=cycle_start,
+        episode=episode,
+    )
+    created_providers = 0
+    if get_user_role(user_id) == "student":
+        student_name = get_user_name(user_id, "The student")
+        for provider_id in get_linked_provider_ids(user_id):
+            try:
+                created = _create_depletion_notification_once(
+                    recipient_id=provider_id,
+                    notification_type=EVENT_STUDENT_ALLOWANCE_DEPLETED,
+                    title="Student Allowance Depleted",
+                    message=f"{student_name}'s allowance has been fully depleted.",
+                    student_id=user_id,
+                    cycle_start=cycle_start,
+                    episode=episode,
+                )
+                if created is not None:
+                    created_providers += 1
+            except Exception:
+                logger.exception(
+                    "Depletion Provider alert failed. provider=%s student=%s episode=%d",
+                    provider_id, user_id, episode,
+                )
+    logger.warning(
+        "FINORA_NOTIF_TRACE depleted-fanout uid=%s episode=%d "
+        "ownerCreated=%s providersCreated=%d",
+        user_id, episode, owner_id is not None, created_providers,
+    )
+    return NotificationEventResponse(
+        success=True,
+        notificationId=owner_id,
+        skipped=owner_id is None and created_providers == 0,
+        message=(
+            f"Depletion episode {episode} processed; "
+            f"linked Providers newly notified: {created_providers}."
+        ),
+    )
+
+
+# ============================================================
 
 # Active Link Validation
 
@@ -898,14 +1070,26 @@ def get_user_role(
 
 
 def _is_active_link_data(data: dict) -> bool:
-    """Return True only for an approved, non-expired link."""
+    """Validate a persistent Student-Provider link without treating request expiry as link expiry."""
 
     status_value = str(
         data.get("status") or ""
     ).strip().lower()
 
-    if status_value != "approved":
-        return False
+    if status_value:
+        # Explicitly inactive or unapproved records must never be forwarded to.
+        if status_value != "approved":
+            return False
+    else:
+        # FINORA's persistent linked_accounts records are created *after*
+        # consent and have no status field. Distinguish them from a pending
+        # link request by requiring the persistent-link identity and timestamp.
+        if not (
+            str(data.get("providerId") or "").strip()
+            and str(data.get("studentId") or "").strip()
+            and data.get("linkedAt") is not None
+        ):
+            return False
 
     expires_at = data.get("expiresAt")
 
@@ -4564,6 +4748,27 @@ def trigger_notification_event(
 
 
 
+    # Reconcile balance after expense deletion, edits, or top-ups.
+    # Android calls BUDGET_EXCEEDED after delete even when balance is positive.
+    # Never use link-request expiration as persistent-link expiration.
+    if event_type not in PROVIDER_ALLOWANCE_EVENTS and event_type != EVENT_ALLOWANCE_DEPLETED:
+        allowance_snapshot = firestore.client().collection(
+            ALLOWANCES_COLLECTION
+        ).document(current_user.uid).get()
+        if allowance_snapshot.exists:
+            allowance_data = allowance_snapshot.to_dict() or {}
+            amount = _safe_float(allowance_data.get("allowanceAmount"))
+            remaining = _safe_float(
+                allowance_data.get("remainingAllowance"), float("inf")
+            )
+            cycle_start = _ms_timestamp(allowance_data.get("cycleStartDate"))
+            if amount > 0 and remaining > 0 and cycle_start > 0:
+                _reconcile_depletion_episode(
+                    current_user.uid,
+                    is_depleted=False,
+                    cycle_start=cycle_start,
+                )
+
     # ========================================================
     # Per-expense alerts are keyed by expense ID, NOT a 24-hour cooldown.
     # Reject requests without a saved ID; never generate false alerts from refreshes.
@@ -4594,12 +4799,36 @@ def trigger_notification_event(
         # Depletion and exceeding are distinct: remaining can be clamped to zero.
         if _safe_float(allowance.get("allowanceAmount")) <= 0 or \
            _safe_float(allowance.get("remainingAllowance"), float("inf")) > 0:
+            # If a deletion/top-up restored funds, reset eligibility even if
+            # this was a delayed depleted-event request.
+            if _safe_float(allowance.get("allowanceAmount")) > 0 and \
+               _safe_float(allowance.get("remainingAllowance"), float("inf")) > 0:
+                restored_cycle = _ms_timestamp(allowance.get("cycleStartDate"))
+                if restored_cycle > 0:
+                    _reconcile_depletion_episode(
+                        current_user.uid,
+                        is_depleted=False,
+                        cycle_start=restored_cycle,
+                    )
             logger.warning(
                 "FINORA_NOTIF_TRACE depleted-skipped uid=%s reason=balance-positive-or-invalid",
                 current_user.uid,
             )
             return NotificationEventResponse(success=True, notificationId=None,
                 skipped=True, message="Allowance is not depleted.")
+
+        cycle_start = _ms_timestamp(allowance.get("cycleStartDate"))
+        if cycle_start <= 0:
+            return NotificationEventResponse(
+                success=True, notificationId=None, skipped=True,
+                message="Allowance cycle start is invalid.",
+            )
+        episode = _reconcile_depletion_episode(
+            current_user.uid,
+            is_depleted=True,
+            cycle_start=cycle_start,
+        )
+        return _send_depletion_episode(current_user.uid, cycle_start, episode)
 
     # PROVIDER -> STUDENT ALLOWANCE
     # ========================================================
